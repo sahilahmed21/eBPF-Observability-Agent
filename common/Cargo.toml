@@ -1,0 +1,8 @@
+[package]
+name = "ebpf-obs-common"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# aya-ebpf / plain types land in Phase 0–1

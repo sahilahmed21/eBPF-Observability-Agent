@@ -1,0 +1,11 @@
+[package]
+name = "ebpf-obs-ebpf"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# aya-ebpf, ebpf-obs-common — wired in Phase 0
+
+[lib]
+path = "src/main.rs"

@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/target/
+Cargo.lock
+**/*.rs.bk
+
+# eBPF build artifacts
+*.o
+*.bpf.o
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Logs / local measurement dumps
+*.log
+/tmp-overhead/
+perf.data*
+
+# Kind / kube local
+kubeconfig-local

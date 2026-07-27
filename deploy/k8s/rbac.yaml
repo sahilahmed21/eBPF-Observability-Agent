@@ -1,0 +1,8 @@
+# Phase 4 — ServiceAccount + RBAC for pod/namespace identity resolution.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ebpf-obs-agent
+  namespace: observability
+---
+# Role/ClusterRole bindings will be added when identity module needs the API.
