@@ -1,2 +1,2 @@
 # eBPF-Observability-Agent
-a distributed rate limiter supporting token bucket, GCRA, and sliding-window-counter algorithms with pluggable backends (local, Redis-Lua, gossip-based); benchmarked accuracy vs. p99 latency under simulated network partition.
+A DaemonSet-deployable agent that reconstructs HTTP/gRPC traces and a live service map from kernel syscalls and TLS uprobes, <2% CPU overhead, zero app code changes.
