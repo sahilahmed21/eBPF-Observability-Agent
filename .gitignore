@@ -1,9 +1,28 @@
-# Ignore local / build artifacts (expand in Phase 0)
-
+# Rust
 /target/
-**/*.bpf.o
+**/target/
+Cargo.lock
+**/*.rs.bk
+
+# eBPF build artifacts
+*.o
+*.bpf.o
+
+# IDE / OS
 .idea/
 .vscode/
 *.swp
 .DS_Store
-notes/private/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Logs / local measurement dumps
+*.log
+/tmp-overhead/
+perf.data*
+
+# Kind / kube local
+kubeconfig-local

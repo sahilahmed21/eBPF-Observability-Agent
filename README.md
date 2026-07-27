@@ -1,176 +1,334 @@
 # Zero-Instrumentation eBPF Observability Agent
 
-Reconstructs per-service HTTP/gRPC latency and a live service map from kernel syscalls and TLS uprobes — **zero app code changes**, target **&lt;2% CPU overhead**.
+A DaemonSet-deployable agent that reconstructs **HTTP/gRPC traces** and a **live service map** from kernel syscalls and TLS uprobes — with **zero application code changes**, near-zero overhead (target **&lt;2% CPU**), and no per-language SDK.
 
-Built in **Rust + Aya (eBPF)**. Deployable as a Kubernetes DaemonSet. Exports OpenTelemetry-compatible traces/metrics.
-
----
-
-## The problem
-
-Every APM vendor sells “add our SDK to every service.” eBPF flips that: attach to the kernel, watch syscalls and network I/O, reconstruct application-level traces (HTTP latency, gRPC call graphs, TLS handshake timing) with no per-language SDK.
-
-Hard parts:
-
-1. Programming inside the kernel under a strict **verifier** (no unbounded loops, 512-byte stack, no arbitrary memory access).
-2. Reconstructing app semantics (HTTP req/res pairing, gRPC framing) from raw syscall/packet bytes.
-3. **TLS** — interesting bytes are encrypted before the wire; intercept via **uprobes** on the SSL library, not the network.
+> **Resume signal:** Built a zero-instrumentation observability agent in Rust using eBPF (Aya) that reconstructs per-service HTTP/gRPC latency and a live service map purely from kernel-level syscall and TLS uprobe data, with under 2% CPU overhead.
 
 ---
 
-## Resume signal
+## Why this exists
 
-> Built a zero-instrumentation observability agent in Rust using eBPF (Aya) that reconstructs per-service HTTP/gRPC latency and a live service map purely from kernel-level syscall and TLS uprobe data, with under 2% CPU overhead.
+Every APM vendor sells “just add our SDK to every service.” That is the adoption barrier.
 
----
+eBPF-based tools (Cloudflare’s internal tooling, Grafana Beyla, Pixie / Tetragon at CNCF) flip the model:
 
-## Stack
+1. Attach to the kernel.
+2. Watch syscalls and network I/O (and TLS library boundaries via uprobes).
+3. Reconstruct application-level traces — HTTP latency, gRPC call graphs, TLS handshake timing — without touching app code.
 
-| Layer | Choice |
-|---|---|
-| eBPF | [Aya](https://aya-rs.dev/) (Rust, CO-RE/BTF) |
-| Kernel | Linux **5.15+** with BTF (`/sys/kernel/btf/vmlinux`) |
-| Userspace | Rust, Tokio |
-| CLI | Ratatui |
-| Export | OpenTelemetry (OTLP) |
-| Deploy | DaemonSet (`CAP_BPF` / `CAP_PERFMON` / `CAP_SYS_PTRACE`) |
+This project implements that model end-to-end in **Rust + Aya**, from a syscall latency MVP through production Kubernetes packaging.
 
 ---
 
-## Architecture (short)
+## What you get (by phase)
+
+| Phase | Capability | Status |
+|-------|------------|--------|
+| **0** | Toolchain + BTF + hello-world kprobe | Not started |
+| **1** | `connect` / `accept` latency tracker + Ratatui CLI | Planned |
+| **2** | HTTP/1.1 request/response pairing + per-endpoint histograms | Planned |
+| **3** | OpenSSL TLS uprobe interception + redaction | Planned |
+| **4** | Service map, OTLP export, Grafana, K8s DaemonSet | Planned |
+| **S1** | gRPC / HTTP/2 frame demux | Stretch |
+| **S2** | Continuous CPU profiling merged into the trace timeline | Stretch |
+
+---
+
+## Architecture at a glance
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Target processes (no SDK)                                  │
-│    SSL_write/read ──uprobe──┐                               │
-│    read/write/sendto ───────┼──► eBPF programs (kernel)     │
-│    connect/accept4 ─────────┘         │                     │
-│                                       ▼                     │
-│                              RingBuf + drop counters        │
-└───────────────────────────────────────┬─────────────────────┘
-                                        │
-                                        ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Userspace agent                                            │
-│    RingBuf consumer → correlation SM → HTTP parse           │
-│    → histograms → service map → Ratatui / OTLP export       │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         Target workloads (no SDKs)                        │
+│   process A ──SSL_write/read──► libssl.so     process B ──write/read──►  │
+└───────────────┬───────────────────────┬─────────────────┬────────────────┘
+                │ uprobes               │ kprobes /       │
+                │ (TLS plaintext)       │ tracepoints     │
+                ▼                       ▼                 ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                     eBPF programs (Aya, CO-RE, BTF)                       │
+│  connect/accept timing │ socket metadata │ HTTP byte prefixes │ TLS hooks │
+│                         RingBuf / HashMaps / drop counters                │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ events
+                                    ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                     Userspace agent (Tokio + Rust)                        │
+│  RingBuf consumer → correlation FSM → HTTP parse → histograms            │
+│  TLS↔syscall merge → service map → redaction → OTLP / CLI dashboard      │
+└───────────────┬───────────────────────────────┬──────────────────────────┘
+                │                               │
+                ▼                               ▼
+         Ratatui CLI                    OTel Collector → Grafana
+         (live tables)                  (metrics + traces)
 ```
 
-Full design: [`docs/architecture/`](docs/architecture/).
+**Design principles**
 
-**Correlation key (no request ID):** `(pid, fd, 4-tuple)` + per-socket state machine + tight timestamp windows. TLS plaintext from uprobes; wire timing from syscalls. See [correlation.md](docs/architecture/correlation.md).
+- Prefer **tracepoints** over fragile kprobe symbol names where stable ABI exists.
+- Prefer **socket-layer / CO-RE** field access for addressing over raw `fd`-only views.
+- Prefer **RingBuf** over PerfEventArray for ordering and memory efficiency.
+- Bound all kernel-side captures (prefix sizes, map cardinality, loop bounds) for the verifier and for overhead.
+- Default load shedding: **sample / drop with explicit drop counters** when the ring buffer cannot keep up.
 
-**Backpressure default:** sample/drop in-kernel with a **drop-counter metric** (option a). Bigger buffers only delay the problem. See [ring-buffer-backpressure.md](docs/architecture/ring-buffer-backpressure.md).
+See [`docs/architecture/`](docs/architecture/) for deep dives.
 
 ---
 
 ## Repository layout
 
 ```
-eBPF-Observability-Agent/
-├── README.md
+.
+├── README.md                          # This file
+├── Cargo.toml                         # Workspace root (Phase 0+)
+├── .gitignore
+├── rust-toolchain.toml                # Stable + nightly (eBPF) pins
+│
 ├── docs/
-│   ├── architecture/          # Design: data flow, correlation, TLS, backpressure
-│   ├── phases/                # Phase checklists + milestones
-│   ├── verifier-rejection-log.md
-│   ├── overhead.md            # Measured CPU/mem per phase
-│   └── security.md            # Trust boundary, redaction, capabilities
-├── ebpf/                      # Aya eBPF crate (bytecode) — Phase 0+
-├── agent/                     # Userspace binary (Tokio + Ratatui + OTLP)
-├── common/                    # Shared event types (ebpf ↔ userspace)
-├── testdata/                  # Deterministic HTTP/HTTPS test servers
-├── benches/                   # Load scripts + overhead harness
-├── deploy/
+│   ├── architecture/                  # System design, data flows, probe map
+│   │   ├── OVERVIEW.md
+│   │   ├── DATA_FLOW.md
+│   │   ├── PROBE_MAP.md
+│   │   ├── CORRELATION.md
+│   │   └── FOLDER_STRUCTURE.md
+│   ├── design-notes/                  # Interview-ready design writeups
+│   │   ├── tls-security.md
+│   │   ├── ring-buffer-backpressure.md
+│   │   └── path-normalization.md
+│   ├── verifier-rejection-log.md      # Real verifier scars (fill as you hit them)
+│   ├── overhead-measurements.md       # CPU%/RSS per phase under fixed load
+│   └── ROADMAP.md                     # Phase checklist
+│
+├── common/                            # Shared types: eBPF ↔ userspace
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── events.rs                  # RingBuf event layouts (#[repr(C)])
+│       └── keys.rs                    # Map keys (pid/fd/tuple helpers)
+│
+├── ebpf/                              # eBPF crate (bpfel-unknown-none)
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs                    # Program entry / license
+│       ├── connect.rs                 # Phase 1: connect/accept probes
+│       ├── socket.rs                  # Phase 1: sock metadata (CO-RE)
+│       ├── http_capture.rs            # Phase 2: read/write prefixes
+│       └── tls.rs                     # Phase 3: SSL_read/SSL_write uprobes
+│
+├── agent/                             # Userspace binary
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs
+│       ├── loader.rs                  # Load/attach BPF, maps, uprobes
+│       ├── consumer/                  # Async RingBuf drain (Tokio AsyncFd)
+│       ├── correlation/               # Per-socket HTTP FSM + TLS merge
+│       ├── http/                      # httparse + path normalize
+│       ├── hist/                      # hdrhistogram aggregations
+│       ├── identity/                  # PID → cgroup → pod/service
+│       ├── service_map/               # In-memory call graph
+│       ├── redaction/                 # Header/secret scrubbing
+│       ├── otel/                      # OTLP traces + metrics
+│       └── dashboard/                 # Ratatui live UI
+│
+├── xtask/                             # Build helpers (aya-style)
+│   ├── Cargo.toml
+│   └── src/main.rs
+│
+├── demos/                             # Local / kind demo workloads
+│   ├── http-server/                   # Axum test service (injectable latency)
+│   ├── https-server/                  # TLS-terminated companion
+│   └── microservices/                 # Multi-service demo for service map
+│
+├── deploy/                            # Production packaging (Phase 4)
 │   ├── Dockerfile
-│   └── k8s/                   # DaemonSet, RBAC, ServiceAccount
-└── notes/                     # Interview diagrams, scratch
+│   ├── k8s/
+│   │   ├── daemonset.yaml
+│   │   ├── rbac.yaml
+│   │   └── configmap.yaml
+│   └── grafana/
+│       └── dashboards/
+│
+├── scripts/                           # Dev / measurement helpers
+│   ├── check-btf.sh
+│   ├── measure-overhead.sh
+│   └── loadgen.sh
+│
+└── tests/                             # Integration / correctness harnesses
+    ├── correctness/
+    └── fixtures/
 ```
 
-Cargo workspace lands in **Phase 0** via `aya-template`. Folders above are the target shape; empty crates are intentional until Milestone 0.
+Full rationale for each crate and module: [`docs/architecture/FOLDER_STRUCTURE.md`](docs/architecture/FOLDER_STRUCTURE.md).
 
 ---
 
-## Phases
+## Stack
 
-| Phase | Goal | Milestone |
-|---|---|---|
-| **0** Setup | Toolchain + BTF + hello kprobe | Load/unload Aya kprobe, `aya-log` works |
-| **1** MVP | `connect`/`accept4` latency + CLI | Live table of endpoints, overhead baseline |
-| **2** HTTP | Uprobe/kprobe byte capture + HTTP/1.1 | Per-endpoint p50/p95/p99 on local server |
-| **3** TLS | OpenSSL `SSL_read`/`SSL_write` uprobes | Same metrics over HTTPS + redaction |
-| **4** Prod | Service map, OTLP, Grafana, DaemonSet | `kubectl apply` → live map on kind |
-| **S** Stretch | HTTP/2+gRPC frames; CPU profile merge | After Phase 4 only |
-
-Detailed checklists: [`docs/phases/`](docs/phases/).
-
-Suggested pace (solo, part-time): ~13 weeks to Phase 4; stretch +2–3 weeks. Realistic calendar: 4–5 months.
+| Layer | Choice | Why |
+|-------|--------|-----|
+| Language | Rust | Memory safety in userspace; Aya ecosystem for eBPF |
+| eBPF framework | [Aya](https://aya-rs.dev/) | Idiomatic Rust eBPF, CO-RE, no BCC runtime dependency |
+| Kernel | Linux **5.15+** with **BTF** | RingBuf, CO-RE, modern map types |
+| Async runtime | Tokio | Non-blocking RingBuf consumer |
+| CLI UI | Ratatui | Live latency tables / sparklines |
+| HTTP parse | `httparse` | Zero-copy header parsing of byte prefixes |
+| Histograms | `hdrhistogram` | High-dynamic-range latency percentiles |
+| Export | OpenTelemetry OTLP | Industry-standard traces + metrics |
+| Deploy | K8s DaemonSet | Node-local privileged (or CAP_BPF) agent |
 
 ---
 
-## Prerequisites (before Phase 0)
+## Prerequisites
 
-### Environment (pick one)
+### Hard requirements
 
-| Option | Notes |
-|---|---|
-| **Cloud/VM (recommended)** | Ubuntu 22.04/24.04, kernel 5.15+. Avoids WSL2 BTF fights. |
-| Native Linux | Cleanest. |
-| WSL2 | Often needs custom kernel with `CONFIG_DEBUG_INFO_BTF=y`. |
+1. **Linux kernel 5.15+** with BTF:
 
-**Hard gate:** `ls /sys/kernel/btf/vmlinux` must exist.
+   ```bash
+   ls /sys/kernel/btf/vmlinux   # must exist
+   uname -r
+   ```
 
-### Toolchain (run on the Linux target)
+2. **Privileges** for loading BPF / attaching probes (dev: root or `CAP_BPF` + `CAP_PERFMON` + `CAP_SYS_PTRACE` on modern kernels).
+
+3. **Rust toolchain** — stable for userspace, nightly + `rust-src` for the eBPF target; `bpf-linker` installed.
+
+### Recommended environment
+
+| Environment | Verdict |
+|-------------|---------|
+| Cloud / native Linux VM (Ubuntu 22.04/24.04) | **Preferred** — fewest BTF surprises |
+| Native Linux laptop | Excellent |
+| WSL2 | Often missing BTF; custom kernel required — avoid for Phase 0 |
+
+This project is CPU/kernel-bound, not GPU-bound. A small cloud VM is ideal.
+
+### Quick env check
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+./scripts/check-btf.sh
+```
+
+---
+
+## Getting started (Phase 0 gate)
+
+Phase 0 is the hard gate: if a trivial Aya kprobe will not compile, load, and log, nothing downstream will either.
+
+```bash
+# 1. Toolchain (outline — detailed in docs/ROADMAP.md Phase 0)
 rustup install stable
 rustup install nightly --component rust-src
 cargo install bpf-linker
-cargo install aya-tool
-# Optional static userspace binary:
-rustup target add x86_64-unknown-linux-musl
+
+# 2. Verify BTF
+./scripts/check-btf.sh
+
+# 3. Scaffold / build / load hello-world kprobe (Phase 0 implementation)
+#    cargo xtask build-ebpf
+#    cargo xtask run   # or: sudo -E cargo run -p agent --release
 ```
 
-Read the [Aya book](https://aya-rs.dev/book/) before writing custom probes.
+**Milestone 0:** Load a trivial Aya kprobe, see output via `aya-log`, unload cleanly.
+
+Do **not** skip reading the [Aya book](https://aya-rs.dev/book/) before writing custom programs. The verifier’s constraints (bounded loops, 512-byte stack, no arbitrary deref, path-sensitive analysis) feel arbitrary until you understand them.
 
 ---
 
-## Interview questions (built into the design)
+## Phase roadmap (summary)
 
-1. **Correlate TCP ↔ HTTP with no request ID?** — fd-keyed state machine; see [correlation.md](docs/architecture/correlation.md).
-2. **What does the verifier reject?** — live log in [verifier-rejection-log.md](docs/verifier-rejection-log.md).
-3. **TLS without app changes + security?** — [tls-interception.md](docs/architecture/tls-interception.md) + [security.md](docs/security.md).
-4. **Ring buffer flooding?** — drop + counter; [ring-buffer-backpressure.md](docs/architecture/ring-buffer-backpressure.md).
+### Phase 1 — MVP: syscall latency tracker
+
+- Tracepoints on `sys_enter/exit_connect` and `accept4`.
+- Entry HashMap `(pid,tid) → timestamp`; exit computes delta → RingBuf event.
+- Socket metadata via CO-RE on `struct sock` (preferred) or `sockaddr` probe-read.
+- Tokio consumer + Ratatui: p50/p95/p99 connect latency per remote endpoint.
+- **Record overhead baseline** under synthetic load.
+
+### Phase 2 — HTTP awareness
+
+- Capture bounded prefixes from `read`/`write` (or `recv`/`send`) on known TCP fds.
+- Correlate with `(pid, fd, tuple)` + per-socket state machine (`AwaitingRequest → … → ResponseReceived`).
+- Parse with `httparse`; normalize paths; `hdrhistogram` per endpoint.
+- Document pipelining mis-pair failure mode honestly.
+
+### Phase 3 — TLS interception
+
+- Uprobes on `SSL_write` / `SSL_read` in `libssl.so.{1.1,3}` (version skew handled at attach time).
+- Correlate TLS plane ↔ syscall plane via `(pid, tid)` + tight timestamp window.
+- Redact `Authorization`, `Cookie`, and common secret patterns before export.
+- Document privilege / trust-boundary implications ([`docs/design-notes/tls-security.md`](docs/design-notes/tls-security.md)).
+
+### Phase 4 — Production grade
+
+- Service map: process/cgroup → container → pod/namespace identity.
+- OTLP traces + metrics; Grafana dashboard; DaemonSet with least-privilege caps where possible.
+- Demo on kind/minikube with a multi-service app — **zero changes** to those services.
+
+### Stretch
+
+- **S1:** HTTP/2 frame demux + gRPC method from `:path`.
+- **S2:** perf-event stack sampling + `blazesym` symbolization merged onto slow-request windows.
+
+Detailed checklist: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 
-## Testing strategy
+## Hard interview questions (and where we answer them)
 
-- **Correctness:** deterministic test server with injectable sleep; assert p50/p99 within tolerance (`testdata/`).
-- **Overhead:** same load script every milestone; record in `docs/overhead.md`.
-- **Verifier:** every rejection → one entry in `docs/verifier-rejection-log.md`.
+| Question | Where we live it |
+|----------|------------------|
+| How do you correlate a kernel TCP event with an HTTP request with **no request ID**? | Phase 2 FSM — [`docs/architecture/CORRELATION.md`](docs/architecture/CORRELATION.md) |
+| What does the **verifier** reject, and how did you restructure? | [`docs/verifier-rejection-log.md`](docs/verifier-rejection-log.md) (fill with real cases) |
+| How do you intercept **TLS** without app changes, and what are the security implications? | Phase 3 + [`docs/design-notes/tls-security.md`](docs/design-notes/tls-security.md) |
+| Ring buffer fills faster than userspace can drain — options and pick? | **Drop with drop-counter metric** by default — [`docs/design-notes/ring-buffer-backpressure.md`](docs/design-notes/ring-buffer-backpressure.md) |
 
 ---
 
-## Security (non-negotiable)
+## Testing & validation strategy
 
-Agent reads **plaintext TLS** on the host. Requires elevated caps. Treat as a high-value trust boundary: least-privilege caps, node-scoped deploy, header redaction (`Authorization`, `Cookie`, secret patterns) before export. Details: [`docs/security.md`](docs/security.md).
+- **Correctness:** deterministic HTTP server with injectable sleep; assert reported p50/p99 within tolerance.
+- **Overhead:** same load script every phase → fill [`docs/overhead-measurements.md`](docs/overhead-measurements.md).
+- **Verifier scars:** every rejection → entry in the rejection log (interview ammunition).
+
+```bash
+./scripts/loadgen.sh          # fixed synthetic load
+./scripts/measure-overhead.sh # agent CPU%/RSS vs baseline
+```
+
+---
+
+## Security model (read before running in shared environments)
+
+This agent is a **high-trust boundary**:
+
+- Requires elevated privileges to attach eBPF / uprobes.
+- TLS uprobes observe **plaintext** application data on the host.
+- Must be scoped (node DaemonSet RBAC, audit, redaction) — never “run casually” on multi-tenant hosts.
+
+See [`docs/design-notes/tls-security.md`](docs/design-notes/tls-security.md).
 
 ---
 
 ## Status
 
 | Item | State |
-|---|---|
-| Docs + layout | ✅ |
-| Phase 0 (BTF + hello kprobe) | ⬜ next |
-| Phase 1–4 | ⬜ |
-
-**Next:** Phase 0 — verify BTF on the Linux target, scaffold Aya template, load a trivial kprobe.
+|------|-------|
+| Docs + folder scaffolding | **Done** (this commit) |
+| Phase 0 — toolchain / hello kprobe | Next |
+| Phases 1–4 | Not started |
 
 ---
 
 ## License
 
-TBD (add when you publish).
+TBD (recommend Apache-2.0 or MIT once code lands).
+
+---
+
+## References
+
+- [Aya book](https://aya-rs.dev/book/)
+- [Aya template](https://github.com/aya-rs/aya-template)
+- [Grafana Beyla](https://grafana.com/oss/beyla/)
+- [Pixie](https://px.dev/) / [Tetragon](https://tetragon.io/)
+- Linux kernel BPF docs (`Documentation/bpf/`)

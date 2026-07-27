@@ -1,0 +1,12 @@
+[package]
+name = "ebpf-obs-agent"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "ebpf-obs-agent"
+path = "src/main.rs"
+
+[dependencies]
+# tokio, aya, aya-log, clap, ratatui, httparse, hdrhistogram, opentelemetry — Phase 0+

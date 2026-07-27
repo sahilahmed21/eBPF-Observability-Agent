@@ -1,0 +1,18 @@
+# Placeholder workspace — Phase 0 will replace this with a real Aya multi-crate workspace.
+#
+# Intended members:
+#   common, ebpf, agent, xtask
+#   demos/http-server, demos/https-server (later)
+#
+# Do not `cargo build` expecting a working agent yet.
+# See docs/ROADMAP.md Phase 0 and docs/architecture/FOLDER_STRUCTURE.md.
+
+[workspace]
+resolver = "2"
+members = []
+# members = ["common", "ebpf", "agent", "xtask"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/your-org/eBPF-Observability-Agent"
