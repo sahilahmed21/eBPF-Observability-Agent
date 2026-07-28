@@ -171,6 +171,8 @@ other two being the deferred items below.
 | WSL2 idles the VM out and systemd wipes `/tmp` on the next boot | `CARGO_TARGET_DIR=/tmp/...` silently lost the whole build between two commands | Use a persistent path: `CARGO_TARGET_DIR=$HOME/.cache/obsagent-target` |
 | Source tree lives on `/mnt/c` (9p) | Slow builds, and `target/` churn on a translated filesystem | Source stays on `/mnt/c` (single source of truth with the Windows checkout); only `CARGO_TARGET_DIR` moves to ext4 |
 | `bpf-linker` cannot `dlopen` the nightly LLVM | Alarming warning on every build | Verified benign by inspecting the object (see task 3) |
+| `rustup` state is per-user | `preflight.sh` run as root reported `rust-src missing` while the build user had it — a misleading FAIL, found by the final re-run | `preflight.sh` now WARNs when run as root. Run it as the user who builds; run only `smoke-milestone0.sh` as root |
+| `rustup` auto-installs on demand | Invoking `rustc +nightly` as root silently installed a 1.3 GB nightly into `/root/.rustup` | Left in place rather than deleting root-owned data: remove with `sudo rm -rf /root/.rustup` if you want the space back. Nothing depends on it |
 
 ## Deferred, with reasons
 

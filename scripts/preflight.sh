@@ -43,6 +43,8 @@ warn "perf_event_paranoid=$(sysctl -n kernel.perf_event_paranoid 2>/dev/null || 
 warn "unprivileged_bpf_disabled=$(sysctl -n kernel.unprivileged_bpf_disabled 2>/dev/null || echo '?')"
 
 # --- toolchain ---
+# rustup is per-user: run this as the user who builds, or these rows describe the wrong store.
+[ "$(id -u)" -eq 0 ] && warn "running as root: rustup rows reflect root's toolchains, not the build user's"
 for tool in bpf-linker bpftool cargo rustup; do
   if command -v "$tool" >/dev/null 2>&1; then pass "$tool on PATH"; else bad "$tool missing"; fi
 done
