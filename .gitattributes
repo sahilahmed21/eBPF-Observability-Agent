@@ -1,0 +1,5 @@
+* text=auto
+
+# Shell scripts are authored on Windows but only ever run on the Linux target;
+# CRLF makes them fail with "bad interpreter".
+*.sh text eol=lf
