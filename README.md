@@ -123,11 +123,14 @@ Suggested pace (solo, part-time): ~13 weeks to Phase 4; stretch +2–3 weeks. Re
 ### Toolchain (run on the Linux target)
 
 ```bash
+sudo apt install -y linux-tools-common "linux-tools-$(uname -r)"   # bpftool: load/unload verification
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup install stable
 rustup install nightly --component rust-src
 cargo install bpf-linker
-cargo install aya-tool
+cargo install cargo-generate
+# Phase 1+, only needed for CO-RE bindings from kernel BTF (not on crates.io):
+# cargo install --git https://github.com/aya-rs/aya -- aya-tool
 # Optional static userspace binary:
 rustup target add x86_64-unknown-linux-musl
 ```
@@ -164,10 +167,14 @@ Agent reads **plaintext TLS** on the host. Requires elevated caps. Treat as a hi
 | Item | State |
 |---|---|
 | Docs + layout | ✅ |
-| Phase 0 (BTF + hello kprobe) | ⬜ next |
+| Phase 0 (BTF + hello kprobe) | ✅ Milestone 0 — loads, logs, unloads clean |
 | Phase 1–4 | ⬜ |
 
-**Next:** Phase 0 — verify BTF on the Linux target, scaffold Aya template, load a trivial kprobe.
+**Next:** Phase 1 — connect/accept tracepoints, event ABI in `common/`, RingBuf + drop counter,
+Tokio consumer, Ratatui table.
+
+Phase 0 runbook: [`docs/phases/phase-0-implementation-plan.md`](docs/phases/phase-0-implementation-plan.md) ·
+evidence: [`docs/testing/phase-0.tdd.md`](docs/testing/phase-0.tdd.md).
 
 ---
 
