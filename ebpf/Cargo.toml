@@ -1,0 +1,19 @@
+[package]
+name = "obsagent-ebpf"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+obsagent-common = { path = "../common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+
+[build-dependencies]
+which = { workspace = true }
+
+# One ELF object holds every program, so they can share maps (Phase 1: the correlation
+# HashMap and the RingBuf). The bin target name is what `aya-build` copies into OUT_DIR.
+[[bin]]
+name = "probes"
+path = "src/main.rs"

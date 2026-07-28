@@ -1,0 +1,35 @@
+[package]
+name = "obsagent"
+version = "0.1.0"
+edition.workspace = true
+
+license.workspace = true
+
+[dependencies]
+obsagent-common = { path = "../common", features = ["user"] }
+
+anyhow = { workspace = true, default-features = true }
+aya = { workspace = true }
+aya-log = { workspace = true }
+env_logger = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "signal",
+] }
+
+[build-dependencies]
+anyhow = { workspace = true }
+aya-build = { workspace = true }
+cargo_metadata = { workspace = true }
+# Declared so cargo invalidates our build script when the BPF crate changes. The actual BPF
+# build happens in build.rs (cargo-in-cargo), because it needs nightly + `-Z build-std`.
+obsagent-ebpf = { path = "../ebpf" }
+
+[[bin]]
+name = "obsagent"
+path = "src/main.rs"

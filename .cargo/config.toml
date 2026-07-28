@@ -1,0 +1,3 @@
+[target."cfg(all())"]
+# Compile as the normal user, run only the binary as root. Never `sudo cargo run`.
+runner = "sudo -E"
