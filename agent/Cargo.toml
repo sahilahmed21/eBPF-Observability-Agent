@@ -11,15 +11,21 @@ obsagent-common = { path = "../common", features = ["user"] }
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
 aya-log = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
 env_logger = { workspace = true }
+hdrhistogram = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
+ratatui = { workspace = true, default-features = true }
 tokio = { workspace = true, features = [
     "macros",
     "rt",
     "rt-multi-thread",
     "net",
     "signal",
+    "time",
+    "sync",
+    "io-util",
 ] }
 
 [build-dependencies]

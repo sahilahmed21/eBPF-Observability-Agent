@@ -168,13 +168,16 @@ Agent reads **plaintext TLS** on the host. Requires elevated caps. Treat as a hi
 |---|---|
 | Docs + layout | ✅ |
 | Phase 0 (BTF + hello kprobe) | ✅ Milestone 0 — loads, logs, unloads clean |
-| Phase 1–4 | ⬜ |
+| Phase 1 (connect/accept latency CLI) | ✅ Milestone 1 — smoke1 + overhead row (`docs/overhead.md`) |
+| Phase 2–4 | ⬜ |
 
-**Next:** Phase 1 — connect/accept tracepoints, event ABI in `common/`, RingBuf + drop counter,
-Tokio consumer, Ratatui table.
+**Next:** Optional accept4 smoke; then Phase 2 HTTP.
 
 Phase 0 runbook: [`docs/phases/phase-0-implementation-plan.md`](docs/phases/phase-0-implementation-plan.md) ·
 evidence: [`docs/testing/phase-0.tdd.md`](docs/testing/phase-0.tdd.md).
+
+Phase 1 runbook: [`docs/phases/phase-1-implementation-plan.md`](docs/phases/phase-1-implementation-plan.md) ·
+evidence: [`docs/testing/phase-1.tdd.md`](docs/testing/phase-1.tdd.md).
 
 ---
 
