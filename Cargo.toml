@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["agent", "common", "ebpf"]
+members = ["agent", "common", "ebpf", "testdata/latency-server", "testdata/http-probe"]
 # `ebpf` is excluded from the defaults: it only builds for bpfel-unknown-none, never the host.
 # `cargo build --workspace` would try to build it for the host and fail.
 default-members = ["agent", "common"]
@@ -21,6 +21,7 @@ cargo_metadata = { version = "0.23.0", default-features = false }
 crossterm = { version = "0.28", default-features = false }
 env_logger = { version = "0.11.5", default-features = false }
 hdrhistogram = { version = "7", default-features = false }
+httparse = { version = "1", default-features = false }
 libc = { version = "0.2.159", default-features = false }
 log = { version = "0.4.22", default-features = false }
 ratatui = { version = "0.29", default-features = false }

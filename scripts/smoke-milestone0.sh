@@ -19,7 +19,7 @@ loaded() { "${PRIV[@]}" bpftool prog list | grep -c " name ${PROG} " || true; }
 [ "$(loaded)" -eq 0 ] || { echo "FAIL: ${PROG} already loaded (leak from an earlier run)"; exit 1; }
 
 # try_to_wake_up fires constantly, so 8s is generous. SIGINT exercises the real shutdown path.
-RUST_LOG=info timeout --signal=INT 8 "${PRIV[@]}" "$BIN" >"$LOG" 2>&1 &
+OBSAGENT_SMOKE_PROBE=1 RUST_LOG=info timeout --signal=INT 8 "${PRIV[@]}" env OBSAGENT_SMOKE_PROBE=1 RUST_LOG=info "$BIN" >"$LOG" 2>&1 &
 runner=$!
 
 sleep 3

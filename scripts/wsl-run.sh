@@ -37,8 +37,16 @@ case "${1:-}" in
     strip scripts/smoke-milestone1.sh /tmp/obs-smoke1.sh
     bash /tmp/obs-smoke1.sh
     ;;
+  smoke2)
+    strip scripts/smoke-milestone2.sh /tmp/obs-smoke2.sh
+    bash /tmp/obs-smoke2.sh
+    ;;
+  correctness2)
+    strip scripts/correctness-phase2.sh /tmp/obs-correctness2.sh
+    bash /tmp/obs-correctness2.sh
+    ;;
   *)
-    echo "usage: $0 {preflight|build|test-common|test-agent|smoke0|smoke1}" >&2
+    echo "usage: $0 {preflight|build|test-common|test-agent|smoke0|smoke1|smoke2|correctness2}" >&2
     exit 2
     ;;
 esac

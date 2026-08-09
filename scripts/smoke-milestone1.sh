@@ -15,7 +15,7 @@ loaded_named() { "${PRIV[@]}" bpftool prog list | grep -c " name ${1} " || true;
   echo "FAIL: ${PROG_CONNECT} already loaded"; exit 1;
 }
 
-OBSAGENT_HEADLESS=1 RUST_LOG=warn timeout --signal=INT 12 "${PRIV[@]}" env OBSAGENT_HEADLESS=1 RUST_LOG=warn "$BIN" >"$LOG" 2>&1 &
+OBSAGENT_HEADLESS=1 OBSAGENT_SMOKE_PROBE=1 RUST_LOG=warn timeout --signal=INT 12 "${PRIV[@]}" env OBSAGENT_HEADLESS=1 OBSAGENT_SMOKE_PROBE=1 RUST_LOG=warn "$BIN" >"$LOG" 2>&1 &
 runner=$!
 
 sleep 2

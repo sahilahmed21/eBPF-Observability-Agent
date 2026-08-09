@@ -1,4 +1,8 @@
 mod agg;
+mod correlate;
+mod decode;
+mod http;
+mod http_agg;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -7,9 +11,12 @@ use agg::Aggregator;
 use anyhow::Context as _;
 use aya::maps::{Array, MapData, RingBuf};
 use aya::programs::{KProbe, TracePoint};
+use correlate::Correlator;
+use decode::{DecodedEvent, decode_event};
+use http::parse_exchange;
+use http_agg::HttpAggregator;
 #[rustfmt::skip]
 use log::{debug, info, warn};
-use obsagent_common::SockLatencyEvent;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -20,6 +27,12 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table};
 use tokio::io::unix::AsyncFd;
 use tokio::signal;
 use tokio::time::MissedTickBehavior;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum View {
+    Tcp,
+    Http,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -55,15 +68,30 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Q9: keep smoke_probe for Phase 0 regression.
-    let smoke: &mut KProbe = ebpf.program_mut("smoke_probe").unwrap().try_into()?;
-    smoke.load()?;
-    smoke.attach("try_to_wake_up", 0)?;
+    // Q15: smoke_probe only when OBSAGENT_SMOKE_PROBE is set (smoke0/1/2).
+    if std::env::var_os("OBSAGENT_SMOKE_PROBE").is_some() {
+        let smoke: &mut KProbe = ebpf
+            .program_mut("smoke_probe")
+            .context("program smoke_probe")?
+            .try_into()?;
+        smoke.load()?;
+        smoke.attach("try_to_wake_up", 0)?;
+    }
 
     attach_tp(&mut ebpf, "enter_connect", "syscalls", "sys_enter_connect")?;
     attach_tp(&mut ebpf, "exit_connect", "syscalls", "sys_exit_connect")?;
     attach_tp(&mut ebpf, "enter_accept4", "syscalls", "sys_enter_accept4")?;
     attach_tp(&mut ebpf, "exit_accept4", "syscalls", "sys_exit_accept4")?;
+    attach_tp(&mut ebpf, "enter_close", "syscalls", "sys_enter_close")?;
+    attach_tp(&mut ebpf, "enter_read", "syscalls", "sys_enter_read")?;
+    attach_tp(&mut ebpf, "exit_read", "syscalls", "sys_exit_read")?;
+    attach_tp(&mut ebpf, "enter_write", "syscalls", "sys_enter_write")?;
+    attach_tp(&mut ebpf, "exit_write", "syscalls", "sys_exit_write")?;
+    // Q2 revised: glibc TcpStream uses sendto/recvfrom (strace evidence 2026-08-07).
+    attach_tp(&mut ebpf, "enter_sendto", "syscalls", "sys_enter_sendto")?;
+    attach_tp(&mut ebpf, "exit_sendto", "syscalls", "sys_exit_sendto")?;
+    attach_tp(&mut ebpf, "enter_recvfrom", "syscalls", "sys_enter_recvfrom")?;
+    attach_tp(&mut ebpf, "exit_recvfrom", "syscalls", "sys_exit_recvfrom")?;
 
     let events_map = ebpf
         .take_map("EVENTS")
@@ -75,13 +103,19 @@ async fn main() -> anyhow::Result<()> {
     let ring = RingBuf::try_from(events_map)?;
     let drops: Array<MapData, u64> = Array::try_from(drops_map)?;
 
-    let agg = Arc::new(Mutex::new(Aggregator::default()));
+    let tcp_agg = Arc::new(Mutex::new(Aggregator::default()));
+    let http_agg = Arc::new(Mutex::new(HttpAggregator::default()));
+    let correlator = Arc::new(Mutex::new(Correlator::default()));
     let rates = Arc::new(Mutex::new(Vec::new()));
     let drop_count = Arc::new(Mutex::new(0u64));
+    let sockio_count = Arc::new(Mutex::new(0u64));
 
-    let agg_rb = Arc::clone(&agg);
+    let tcp_rb = Arc::clone(&tcp_agg);
+    let http_rb = Arc::clone(&http_agg);
+    let corr_rb = Arc::clone(&correlator);
     let rates_rb = Arc::clone(&rates);
     let drop_rb = Arc::clone(&drop_count);
+    let sockio_rb = Arc::clone(&sockio_count);
     let mut poll = AsyncFd::with_interest(ring, tokio::io::Interest::READABLE)?;
     tokio::task::spawn(async move {
         let mut events_in_tick = 0u64;
@@ -96,16 +130,30 @@ async fn main() -> anyhow::Result<()> {
                     };
                     let rb = guard.get_inner_mut();
                     while let Some(item) = rb.next() {
-                        let ev = read_event(&item);
-                        if let Ok(mut a) = agg_rb.lock() {
-                            a.record(&ev, Instant::now());
+                        let Some(decoded) = decode_event(item.as_ref()) else {
+                            continue;
+                        };
+                        let now = Instant::now();
+                        match decoded {
+                            DecodedEvent::Latency(ev) => {
+                                lock_mut(&tcp_rb).record(&ev, now);
+                            }
+                            DecodedEvent::Io(ev) => {
+                                *lock_mut(&sockio_rb) += 1;
+                                if let Some(ex) = lock_mut(&corr_rb).observe(&ev, now) {
+                                    if let Some(parsed) = parse_exchange(&ex) {
+                                        lock_mut(&http_rb).record(&parsed, now);
+                                    }
+                                }
+                            }
                         }
                         events_in_tick += 1;
                     }
                     guard.clear_ready();
                 }
                 _ = tick.tick() => {
-                    if let Ok(mut r) = rates_rb.lock() {
+                    {
+                        let mut r = lock_mut(&rates_rb);
                         r.push(events_in_tick);
                         if r.len() > 60 {
                             r.remove(0);
@@ -113,26 +161,22 @@ async fn main() -> anyhow::Result<()> {
                     }
                     events_in_tick = 0;
                     if let Ok(v) = drops.get(&0, 0) {
-                        if let Ok(mut d) = drop_rb.lock() {
-                            *d = v;
-                        }
+                        *lock_mut(&drop_rb) = v;
                     }
                 }
             }
         }
     });
 
-    info!("Phase 1 agent running (connect/accept4 latency). q/Ctrl-C to quit.");
-    // Latency is syscall enter→exit only (Q7); -EINPROGRESS is not TCP established.
+    info!("Phase 2 agent running (TCP + HTTP). q quit, t toggle view.");
     let headless = std::env::var_os("OBSAGENT_HEADLESS").is_some()
         || !std::io::IsTerminal::is_terminal(&std::io::stdout());
     if headless {
-        run_headless(agg, drop_count).await?;
+        run_headless(tcp_agg, http_agg, drop_count, sockio_count).await?;
     } else {
-        run_tui(agg, rates, drop_count).await?;
+        run_tui(tcp_agg, http_agg, rates, drop_count).await?;
     }
 
-    // Keep ebpf alive until UI/headless exits (maps moved out; programs drop with ebpf).
     drop(ebpf);
     Ok(())
 }
@@ -152,16 +196,15 @@ fn attach_tp(
     Ok(())
 }
 
-fn read_event(item: &aya::maps::ring_buf::RingBufItem<'_>) -> SockLatencyEvent {
-    let bytes = item.as_ref();
-    assert!(bytes.len() >= core::mem::size_of::<SockLatencyEvent>());
-    // SAFETY: kernel writes SockLatencyEvent; size checked above.
-    unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<SockLatencyEvent>()) }
+fn lock_mut<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 async fn run_headless(
-    agg: Arc<Mutex<Aggregator>>,
+    tcp_agg: Arc<Mutex<Aggregator>>,
+    http_agg: Arc<Mutex<HttpAggregator>>,
     drop_count: Arc<Mutex<u64>>,
+    sockio_count: Arc<Mutex<u64>>,
 ) -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -170,16 +213,31 @@ async fn run_headless(
             _ = signal::ctrl_c() => break,
             _ = tick.tick() => {
                 let now = Instant::now();
-                let rows = agg.lock().map(|a| a.rows(now)).unwrap_or_default();
-                let total: u64 = rows.iter().map(|(_, r)| r.count).sum();
-                let drops = drop_count.lock().map(|d| *d).unwrap_or(0);
-                println!("events_60s={total} endpoints={} drops={drops}", rows.len());
-                for (k, r) in rows.iter().take(8) {
+                let tcp_rows = lock_mut(&tcp_agg).rows(now);
+                let http_rows = lock_mut(&http_agg).rows(now);
+                let tcp_total: u64 = tcp_rows.iter().map(|(_, r)| r.count).sum();
+                let http_total: u64 = http_rows.iter().map(|(_, r)| r.count).sum();
+                let drops = *lock_mut(&drop_count);
+                let sockio = *lock_mut(&sockio_count);
+                println!(
+                    "events_60s={tcp_total} tcp_60s={tcp_total} http_60s={http_total} sockio={sockio} drops={drops}"
+                );
+                for (k, r) in http_rows.iter().take(8) {
                     println!(
-                        "  {} count={} err={} p50={}",
+                        "  {} count={} rate={:.2}/s p50={} 4xx={:.0}% 5xx={:.0}%",
                         k.label(),
                         r.count,
-                        r.errors,
+                        r.rate_per_s,
+                        fmt_ns(r.p50_ns),
+                        r.pct_4xx,
+                        r.pct_5xx
+                    );
+                }
+                for (k, r) in tcp_rows.iter().take(4) {
+                    println!(
+                        "  [tcp] {} count={} p50={}",
+                        k.label(),
+                        r.count,
                         fmt_ns(r.p50_ns)
                     );
                 }
@@ -190,7 +248,8 @@ async fn run_headless(
 }
 
 async fn run_tui(
-    agg: Arc<Mutex<Aggregator>>,
+    tcp_agg: Arc<Mutex<Aggregator>>,
+    http_agg: Arc<Mutex<HttpAggregator>>,
     rates: Arc<Mutex<Vec<u64>>>,
     drop_count: Arc<Mutex<u64>>,
 ) -> anyhow::Result<()> {
@@ -201,6 +260,7 @@ async fn run_tui(
 
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut view = View::Http;
 
     loop {
         tokio::select! {
@@ -214,13 +274,27 @@ async fn run_tui(
                         {
                             break;
                         }
+                        if key.code == KeyCode::Char('t') {
+                            view = match view {
+                                View::Tcp => View::Http,
+                                View::Http => View::Tcp,
+                            };
+                        }
                     }
                 }
                 let now = Instant::now();
-                let rows = agg.lock().map(|a| a.rows(now)).unwrap_or_default();
-                let spark: Vec<u64> = rates.lock().map(|r| r.clone()).unwrap_or_default();
-                let drops = drop_count.lock().map(|d| *d).unwrap_or(0);
-                terminal.draw(|f| draw(f, &rows, &spark, drops))?;
+                let spark: Vec<u64> = lock_mut(&rates).clone();
+                let drops = *lock_mut(&drop_count);
+                match view {
+                    View::Tcp => {
+                        let rows = lock_mut(&tcp_agg).rows(now);
+                        terminal.draw(|f| draw_tcp(f, &rows, &spark, drops))?;
+                    }
+                    View::Http => {
+                        let rows = lock_mut(&http_agg).rows(now);
+                        terminal.draw(|f| draw_http(f, &rows, &spark, drops))?;
+                    }
+                }
             }
         }
     }
@@ -230,7 +304,7 @@ async fn run_tui(
     Ok(())
 }
 
-fn draw(
+fn draw_tcp(
     f: &mut Frame<'_>,
     rows: &[(agg::EndpointKey, agg::RowSnapshot)],
     spark: &[u64],
@@ -246,7 +320,7 @@ fn draw(
         .split(f.area());
 
     let header = Paragraph::new(format!(
-        "obsagent Phase 1 — connect/accept latency (60s) | drops={drops} | q quit\nQ7: latency = syscall enter→exit (EINPROGRESS ≠ connected)"
+        "obsagent Phase 2 — TCP connect/accept (60s) | drops={drops} | t toggle | q quit\nQ7: latency = syscall enter→exit"
     ))
     .block(Block::default().borders(Borders::ALL).title("status"));
     f.render_widget(header, chunks[0]);
@@ -276,7 +350,66 @@ fn draw(
         ],
     )
     .header(Row::new(header_cells).style(Style::new().bold()))
-    .block(Block::default().borders(Borders::ALL).title("endpoints"));
+    .block(Block::default().borders(Borders::ALL).title("tcp endpoints"));
+    f.render_widget(table, chunks[1]);
+
+    let sparkline = Sparkline::default()
+        .block(Block::default().borders(Borders::ALL).title("events/s"))
+        .data(spark);
+    f.render_widget(sparkline, chunks[2]);
+}
+
+fn draw_http(
+    f: &mut Frame<'_>,
+    rows: &[(http::HttpEndpoint, http_agg::HttpRow)],
+    spark: &[u64],
+    drops: u64,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(5),
+        ])
+        .split(f.area());
+
+    let header = Paragraph::new(format!(
+        "obsagent Phase 2 — HTTP endpoints (60s) | drops={drops} | t toggle | q quit\nQ8: latency = request-half exit → response-half exit; metrics only (Q14)"
+    ))
+    .block(Block::default().borders(Borders::ALL).title("status"));
+    f.render_widget(header, chunks[0]);
+
+    let header_cells = ["endpoint", "count", "rate", "p50", "p95", "p99", "4xx%", "5xx%"]
+        .into_iter()
+        .map(Cell::from);
+    let table_rows = rows.iter().take(32).map(|(k, r)| {
+        Row::new(vec![
+            Cell::from(k.label()),
+            Cell::from(r.count.to_string()),
+            Cell::from(format!("{:.1}", r.rate_per_s)),
+            Cell::from(fmt_ns(r.p50_ns)),
+            Cell::from(fmt_ns(r.p95_ns)),
+            Cell::from(fmt_ns(r.p99_ns)),
+            Cell::from(format!("{:.0}", r.pct_4xx)),
+            Cell::from(format!("{:.0}", r.pct_5xx)),
+        ])
+    });
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Percentage(30),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(6),
+            Constraint::Length(6),
+        ],
+    )
+    .header(Row::new(header_cells).style(Style::new().bold()))
+    .block(Block::default().borders(Borders::ALL).title("http endpoints"));
     f.render_widget(table, chunks[1]);
 
     let sparkline = Sparkline::default()
