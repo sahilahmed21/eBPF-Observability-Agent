@@ -1,0 +1,14 @@
+# Pins decided at Phase 0 when Aya version is chosen.
+# Example shape (uncomment / adjust during Phase 0):
+#
+# [toolchain]
+# channel = "stable"
+# components = ["rustfmt", "clippy"]
+#
+# Nightly is required for building the eBPF crate (rust-src + bpf linker).
+# Many Aya projects use a rust-toolchain.toml in ebpf/ or rely on xtask to
+# invoke +nightly explicitly.
+
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

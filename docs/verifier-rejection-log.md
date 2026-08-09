@@ -1,24 +1,24 @@
 # Verifier rejection log
 
-Every BPF verifier rejection that forced a restructure goes here. Interview ammo = real scars, not textbook hypothetics.
+Append-only log of **real** BPF verifier rejections hit while building this agent.
+Hypothetical entries do not belong here — interview prep needs scar tissue.
 
-| Date | Program | Reject reason (short) | Fix |
-|---|---|---|---|
-| | | | |
+| Date | Program / function | Symptom (verifier message summary) | Root cause | Fix / restructure |
+|------|--------------------|--------------------------------------|------------|-------------------|
+| — | — | *(none yet — Phase 0+)* | — | — |
 
-## Common patterns to expect
+## How to write a good entry
 
-- Unbounded / verifier-unprovable loops → bounded `for` with constant limit
-- Stack > 512 B → smaller locals, per-cpu array scratch
-- Invalid pointer / missing `bpf_probe_read*` → helper reads + null checks
-- Unreleased ringbuf reservation → always discard/submit on all paths
-- Map value too large → shrink event / use truncated prefix
+1. Paste the truncated verifier log (or the decisive lines).
+2. Name the probe and the helper/map access that failed.
+3. Explain the restructuring in one sentence (e.g. “moved 512-byte buffer from stack to per-CPU array”).
+4. Link the commit SHA once code exists.
 
-Template entry:
+## Common rejection classes (reference — not substitutes for real entries)
 
-```
-### YYYY-MM-DD — <prog name>
-- Reject: <paste key verifier line>
-- Why unsafe from verifier POV:
-- Restructure:
-```
+- Unbounded / verifier-unprovable loops
+- Stack > 512 bytes
+- Invalid pointer arithmetic / unchecked map value pointers
+- Reading kernel/user memory without `bpf_probe_read_*`
+- Incomplete `bpf_ringbuf_reserve` null checks before write
+- Type mismatches on CO-RE field access without proper BTF

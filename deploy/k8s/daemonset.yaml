@@ -1,0 +1,39 @@
+# Phase 4 — illustrative DaemonSet shape (not yet applied).
+# Replace image, refine capabilities for your cluster kernel.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ebpf-obs-agent
+  namespace: observability
+spec:
+  selector:
+    matchLabels:
+      app: ebpf-obs-agent
+  template:
+    metadata:
+      labels:
+        app: ebpf-obs-agent
+    spec:
+      hostPID: true
+      serviceAccountName: ebpf-obs-agent
+      containers:
+        - name: agent
+          image: ebpf-obs-agent:latest
+          securityContext:
+            # Prefer explicit caps on 5.8+ kernels when possible:
+            # capabilities.add: ["BPF", "PERFMON", "SYS_PTRACE"]
+            privileged: true
+          volumeMounts:
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+            - name: debug
+              mountPath: /sys/kernel/debug
+              readOnly: true
+      volumes:
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+        - name: debug
+          hostPath:
+            path: /sys/kernel/debug
