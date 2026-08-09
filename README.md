@@ -59,7 +59,7 @@ Hard parts:
 
 Full design: [`docs/architecture/`](docs/architecture/).
 
-**Correlation key (no request ID):** `(pid, fd, 4-tuple)` + per-socket state machine + tight timestamp windows. TLS plaintext from uprobes; wire timing from syscalls. See [correlation.md](docs/architecture/correlation.md).
+**Correlation key (no request ID):** `(pid, fd, 4-tuple)` + per-socket state machine. Phase 2 uses sock I/O prefixes; Phase 3 feeds OpenSSL plaintext (`TlsIo`) into the **same** SM after `SSL_set_fd`→fd mapping (TLS-only latency in M3 — not dual-plane wire timing). See [correlation.md](docs/architecture/correlation.md).
 
 **Backpressure default:** sample/drop in-kernel with a **drop-counter metric** (option a). Bigger buffers only delay the problem. See [ring-buffer-backpressure.md](docs/architecture/ring-buffer-backpressure.md).
 
@@ -98,7 +98,7 @@ Cargo workspace lands in **Phase 0** via `aya-template`. Folders above are the t
 | **0** Setup | Toolchain + BTF + hello kprobe | Load/unload Aya kprobe, `aya-log` works |
 | **1** MVP | `connect`/`accept4` latency + CLI | Live table of endpoints, overhead baseline |
 | **2** HTTP | Uprobe/kprobe byte capture + HTTP/1.1 | Per-endpoint p50/p95/p99 on local server |
-| **3** TLS | OpenSSL `SSL_read`/`SSL_write` uprobes | Same metrics over HTTPS + redaction |
+| **3** TLS | OpenSSL `SSL_set_fd` + `SSL_read`/`SSL_write` → `TlsIo` | Same HTTP metrics over HTTPS (TLS-only latency); soft-fail without libssl |
 | **4** Prod | Service map, OTLP, Grafana, DaemonSet | `kubectl apply` → live map on kind |
 | **S** Stretch | HTTP/2+gRPC frames; CPU profile merge | After Phase 4 only |
 

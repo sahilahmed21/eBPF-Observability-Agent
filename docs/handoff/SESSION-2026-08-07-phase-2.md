@@ -240,11 +240,10 @@ userspace:
 - No CI workflow; no push to origin yet  
 - IPv6 still deferred  
 
-**Phase 3 owns** (`docs/phases/phase-3.md`):
+**Phase 3 owns** (`docs/phases/phase-3.md`, plan + locked Qs in `phase-3-implementation-plan.md`):
 
-- TLS uprobe / OPENSSL (or chosen stack)  
-- Encrypted traffic visibility without app changes  
-- Do **not** redesign Phase 2 ABI “for later” without a plan + locked Qs  
+- OpenSSL uprobes + `SSL_set_fd`→fd → `TlsIo` → existing correlator (TLS-only latency)
+- **Not** dual-plane TLS↔syscall wire merge, Go/rustls/BoringSSL, HTTP/2, OTLP, k8s
 
 ---
 

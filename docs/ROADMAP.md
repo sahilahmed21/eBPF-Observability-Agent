@@ -32,14 +32,17 @@ Use this as the execution checklist. Update status as milestones land.
 - [ ] Document pipelining mis-pair failure mode
 - [ ] **Milestone 2** complete
 
-## Phase 3 — TLS interception
+## Phase 3 — TLS interception (OpenSSL HTTPS)
 
-- [ ] Resolve `libssl` from `/proc/<pid>/maps`
-- [ ] Uprobes: `SSL_write` / `SSL_read` (1.1 and 3)
-- [ ] TLS↔syscall correlation + dedup
-- [ ] Redaction pass (Authorization, Cookie, secret patterns)
-- [ ] Design note: trust boundary / privileges
-- [ ] **Milestone 3** complete
+Plan: [phases/phase-3-implementation-plan.md](phases/phase-3-implementation-plan.md) (Q1–Q12 locked; Q13–Q15 filled).
+
+- [x] Try-attach `libssl.so.3` / `libssl.so.1.1` (soft-fail; cleartext must keep working)
+- [x] Uprobes: `SSL_set_fd` (+ rfd/wfd), `SSL_write`/`SSL_read` + `_ex` enter-stash / exit-emit
+- [x] `TlsIo` → existing `(tgid,fd)` correlator (TLS-only latency — **no** dual-plane wire merge)
+- [x] Skip sock I/O on TLS-marked fds; metrics-only UI; never log raw prefixes
+- [x] OpenSSL-backed HTTPS testdata + smoke/correctness/overhead
+- [x] Security note reviewed (`security.md` / design-notes)
+- [x] **Milestone 3** complete
 
 ## Phase 4 — Production grade
 

@@ -6,14 +6,14 @@ use aya_ebpf::{
         bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user,
         bpf_probe_read_user_buf,
     },
-    macros::{kprobe, map, tracepoint},
+    macros::{kprobe, map, tracepoint, uprobe, uretprobe},
     maps::{Array, HashMap, PerCpuArray, RingBuf},
-    programs::{ProbeContext, TracePointContext},
+    programs::{ProbeContext, RetProbeContext, TracePointContext},
 };
 use aya_log_ebpf::info;
 use obsagent_common::{
     AF_INET, EVENTS_RINGBUF_BYTES, EventKind, IoDir, PENDING_MAP_ENTRIES, PendingEnter,
-    PendingIo, SOCK_IO_PREFIX_LEN, SockIoEvent, SockLatencyEvent,
+    PendingIo, PendingTls, SOCK_IO_PREFIX_LEN, SockIoEvent, SockLatencyEvent,
 };
 
 // Tracepoint field offsets from this kernel's format files (WSL2 6.6).
@@ -30,9 +30,23 @@ static PENDING: HashMap<u32, PendingEnter> =
 static PENDING_IO: HashMap<u32, PendingIo> =
     HashMap::<u32, PendingIo>::with_max_entries(PENDING_MAP_ENTRIES, 0);
 
+#[map]
+static PENDING_TLS: HashMap<u32, PendingTls> =
+    HashMap::<u32, PendingTls>::with_max_entries(PENDING_MAP_ENTRIES, 0);
+
 /// Q4: fds observed via connect/accept (process fd table). Key = (tgid, fd).
 #[map]
 static SOCK_FDS: HashMap<u64, u8> =
+    HashMap::<u64, u8>::with_max_entries(PENDING_MAP_ENTRIES, 0);
+
+/// Phase 3 Q1: SSL* → fd (from SSL_set_fd / rfd / wfd).
+#[map]
+static SSL_FD: HashMap<u64, i32> =
+    HashMap::<u64, i32>::with_max_entries(PENDING_MAP_ENTRIES, 0);
+
+/// Phase 3 Q8: fds known to be TLS — skip Phase 2 sock I/O. Key = (tgid, fd).
+#[map]
+static TLS_FDS: HashMap<u64, u8> =
     HashMap::<u64, u8>::with_max_entries(PENDING_MAP_ENTRIES, 0);
 
 #[map]
@@ -79,12 +93,29 @@ fn unmark_sock_fd(fd: u32) {
     let (tgid, _) = pid_tgid();
     let key = sock_fd_key(tgid, fd);
     let _ = SOCK_FDS.remove(&key);
+    let _ = TLS_FDS.remove(&key);
 }
 
 fn is_marked_sock_fd(fd: u32) -> bool {
     let (tgid, _) = pid_tgid();
     let key = sock_fd_key(tgid, fd);
     unsafe { SOCK_FDS.get(&key).is_some() }
+}
+
+fn is_tls_fd(fd: u32) -> bool {
+    let (tgid, _) = pid_tgid();
+    let key = sock_fd_key(tgid, fd);
+    unsafe { TLS_FDS.get(&key).is_some() }
+}
+
+fn mark_tls_fd(fd: i32) {
+    if fd < 0 {
+        return;
+    }
+    let (tgid, _) = pid_tgid();
+    let key = sock_fd_key(tgid, fd as u32);
+    let one: u8 = 1;
+    let _ = TLS_FDS.insert(&key, &one, 0);
 }
 
 fn bump_drop() {
@@ -144,6 +175,10 @@ fn looks_like_http_fixed(prefix: &[u8; SOCK_IO_PREFIX_LEN], len: u16) -> bool {
 }
 
 fn emit_io(pending: &PendingIo, ret: i64) {
+    emit_io_kind(EventKind::SockIo, pending.buf_ptr, pending.fd, pending.dir, ret);
+}
+
+fn emit_io_kind(kind: EventKind, buf_ptr: u64, fd: i32, dir: u8, ret: i64) {
     let now = unsafe { bpf_ktime_get_ns() };
     let (tgid, pid) = pid_tgid();
 
@@ -159,10 +194,10 @@ fn emit_io(pending: &PendingIo, ret: i64) {
         return;
     };
     let ev = unsafe { &mut *scratch };
-    ev.kind = EventKind::SockIo as u8;
-    ev.dir = pending.dir;
+    ev.kind = kind as u8;
+    ev.dir = dir;
     ev.prefix_len = prefix_len;
-    ev.fd = pending.fd;
+    ev.fd = fd;
     ev.pid = pid;
     ev.tgid = tgid;
     ev.ret = ret;
@@ -172,9 +207,7 @@ fn emit_io(pending: &PendingIo, ret: i64) {
     // Copy at most prefix_len bytes. Verifier needs a fixed dest size; we use the
     // full array but only treat prefix_len as valid (userspace caps too).
     if prefix_len > 0 {
-        let _ = unsafe {
-            bpf_probe_read_user_buf(pending.buf_ptr as *const u8, &mut ev.prefix)
-        };
+        let _ = unsafe { bpf_probe_read_user_buf(buf_ptr as *const u8, &mut ev.prefix) };
     }
 
     // Second gate: skip non-HTTP on marked sockets (SSH, etc.).
@@ -193,6 +226,10 @@ fn emit_io(pending: &PendingIo, ret: i64) {
 fn try_enter_io(ctx: &TracePointContext, dir: IoDir) -> Result<(), i64> {
     let fd: u64 = unsafe { ctx.read_at(ENTER_FD_OFF)? };
     let fd = fd as u32;
+    // Q8: TLS-marked fds skip Phase 2 sock I/O (ciphertext).
+    if is_tls_fd(fd) {
+        return Ok(());
+    }
     // Q4: only fds marked via connect/accept (enter-side — cheap).
     if !is_marked_sock_fd(fd) {
         return Ok(());
@@ -435,6 +472,172 @@ fn try_exit_io(ctx: &TracePointContext) -> Result<(), i64> {
     let ret: i64 = unsafe { ctx.read_at(EXIT_RET_OFF)? };
     emit_io(&pending, ret);
     Ok(())
+}
+
+// --- Phase 3: OpenSSL uprobes (Q1/Q7) ---
+
+#[uprobe]
+pub fn enter_ssl_set_fd(ctx: ProbeContext) -> u32 {
+    match try_enter_ssl_set_fd(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+fn try_enter_ssl_set_fd(ctx: &ProbeContext) -> Result<(), u32> {
+    let ssl: u64 = ctx.arg(0).ok_or(1u32)?;
+    let fd: i32 = ctx.arg(1).ok_or(1u32)?;
+    if ssl == 0 || fd < 0 {
+        return Ok(());
+    }
+    let _ = SSL_FD.insert(&ssl, &fd, 0);
+    mark_tls_fd(fd);
+    Ok(())
+}
+
+#[uprobe]
+pub fn enter_ssl_write(ctx: ProbeContext) -> u32 {
+    match try_enter_ssl_io(&ctx, IoDir::Write) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[uretprobe]
+pub fn exit_ssl_write(ctx: RetProbeContext) -> u32 {
+    match try_exit_ssl_io(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[uprobe]
+pub fn enter_ssl_read(ctx: ProbeContext) -> u32 {
+    match try_enter_ssl_io(&ctx, IoDir::Read) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[uretprobe]
+pub fn exit_ssl_read(ctx: RetProbeContext) -> u32 {
+    match try_exit_ssl_io(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+fn try_enter_ssl_io(ctx: &ProbeContext, dir: IoDir) -> Result<(), u32> {
+    let ssl: u64 = ctx.arg(0).ok_or(1u32)?;
+    let buf: u64 = ctx.arg(1).ok_or(1u32)?;
+    if ssl == 0 || buf == 0 {
+        return Ok(());
+    }
+    // Q1: require SSL_set_fd mapping before we bother stashing.
+    if unsafe { SSL_FD.get(&ssl) }.is_none() {
+        return Ok(());
+    }
+    let pending = PendingTls {
+        buf_ptr: buf,
+        ssl_ptr: ssl,
+        outlen_ptr: 0,
+        dir: dir as u8,
+        _pad: [0; 7],
+    };
+    PENDING_TLS.insert(&tid(), &pending, 0).map_err(|_| 1u32)?;
+    Ok(())
+}
+
+/// `SSL_write_ex` / `SSL_read_ex`: byte count lives in `*arg3` on success (ret==1).
+fn try_enter_ssl_io_ex(ctx: &ProbeContext, dir: IoDir) -> Result<(), u32> {
+    let ssl: u64 = ctx.arg(0).ok_or(1u32)?;
+    let buf: u64 = ctx.arg(1).ok_or(1u32)?;
+    let outlen: u64 = ctx.arg(3).ok_or(1u32)?;
+    if ssl == 0 || buf == 0 || outlen == 0 {
+        return Ok(());
+    }
+    if unsafe { SSL_FD.get(&ssl) }.is_none() {
+        return Ok(());
+    }
+    let pending = PendingTls {
+        buf_ptr: buf,
+        ssl_ptr: ssl,
+        outlen_ptr: outlen,
+        dir: dir as u8,
+        _pad: [0; 7],
+    };
+    PENDING_TLS.insert(&tid(), &pending, 0).map_err(|_| 1u32)?;
+    Ok(())
+}
+
+fn try_exit_ssl_io(ctx: &RetProbeContext) -> Result<(), u32> {
+    let tid = tid();
+    let Some(pending) = (unsafe { PENDING_TLS.get(&tid) }) else {
+        return Ok(());
+    };
+    let pending = *pending;
+    let _ = PENDING_TLS.remove(&tid);
+
+    let Some(fd) = (unsafe { SSL_FD.get(&pending.ssl_ptr) }) else {
+        // Q1: drop if fd unknown.
+        return Ok(());
+    };
+    let fd = *fd;
+
+    let ret: i64 = if pending.outlen_ptr == 0 {
+        ctx.ret()
+    } else {
+        let ok: i32 = ctx.ret();
+        if ok != 1 {
+            0
+        } else {
+            match unsafe { bpf_probe_read_user(pending.outlen_ptr as *const u64) } {
+                Ok(n) => n as i64,
+                Err(_) => 0,
+            }
+        }
+    };
+
+    emit_io_kind(
+        EventKind::TlsIo,
+        pending.buf_ptr,
+        fd,
+        pending.dir,
+        ret,
+    );
+    Ok(())
+}
+
+#[uprobe]
+pub fn enter_ssl_write_ex(ctx: ProbeContext) -> u32 {
+    match try_enter_ssl_io_ex(&ctx, IoDir::Write) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[uretprobe]
+pub fn exit_ssl_write_ex(ctx: RetProbeContext) -> u32 {
+    match try_exit_ssl_io(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[uprobe]
+pub fn enter_ssl_read_ex(ctx: ProbeContext) -> u32 {
+    match try_enter_ssl_io_ex(&ctx, IoDir::Read) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[uretprobe]
+pub fn exit_ssl_read_ex(ctx: RetProbeContext) -> u32 {
+    match try_exit_ssl_io(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
 }
 
 #[cfg(not(test))]

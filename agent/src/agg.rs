@@ -33,7 +33,7 @@ impl EndpointKey {
         let dir = match self.kind {
             EventKind::Connect => "connect",
             EventKind::Accept => "accept",
-            EventKind::SockIo => "sockio", // not used in TCP agg keys
+            EventKind::SockIo | EventKind::TlsIo => "sockio", // not used in TCP agg keys
         };
         format!("{ip}:{port} {dir}")
     }

@@ -20,7 +20,7 @@ Zero-instrumentation observability: reconstruct HTTP/gRPC latency and a service 
 |---|---|---|
 | 1 | `syscalls:sys_enter/exit_connect`, `accept4`; later `tcp_v4_connect` / sock fields | Connect/accept latency, 4-tuple |
 | 2 | `read`/`write`/`recvfrom`/`sendto` (socket fds only) | Bounded buffer prefix (256–512 B) |
-| 3 | `SSL_write` / `SSL_read` in `libssl` | Plaintext prefix + SSL* context |
+| 3 | `SSL_set_fd` + `SSL_write` / `SSL_read` in `libssl` | Plaintext prefix (`TlsIo`); TLS-only latency via existing fd SM |
 | 4 | Same + cgroup/CRI identity | Service-map nodes/edges |
 | S | HTTP/2 frame parse; `perf_event` stacks | Stream demux; CPU samples |
 
@@ -44,6 +44,7 @@ See [data-flow.md](data-flow.md).
 | Backpressure | Drop + counter | Bound kernel memory; visible loss |
 | HTTP correlation | fd state machine | No request ID in kernel |
 | TLS | OpenSSL uprobes first | Plaintext before encrypt; Go crypto/tls later/limitation |
+| TLS latency (M3) | TLS-only half exit→exit | Dual-plane wire timing is a different product — out of Phase 3 |
 | Histograms | `hdrhistogram` | Industry-standard percentile math |
 | Export | OTLP | Interops with Collector → Tempo/Prometheus/Grafana |
 
@@ -53,3 +54,5 @@ See [data-flow.md](data-flow.md).
 - Graph DB for service map (in-memory adjacency is enough)
 - Perfect HTTP/1.1 pipelining pairing (document mis-pair rate)
 - Supporting every TLS stack on day one
+- Dual-plane TLS content + syscall wire-timing merge in Phase 3
+- HTTP/2, OTLP, Kubernetes identity work inside Phase 3

@@ -44,16 +44,23 @@ Within a bounded time window, that pair is almost always one exchange.
 
 Stale states evicted by timeout (client disconnect, hung request).
 
-## TLS plane + syscall plane
+## TLS plane (Phase 3 / Milestone 3)
 
-`SSL_write` internally leads to `write`/`sendto` on the underlying fd. Two probes for one logical op:
+HTTPS encrypts in userspace, so Phase 2 sock I/O prefixes are ciphertext and useless.
+Phase 3 hooks OpenSSL and **reuses this same `(tgid, fd)` state machine**:
 
-| Signal | Authoritative for |
-|---|---|
-| TLS uprobe (`SSL_*`) | **Content** (plaintext) |
-| Syscall / sock probe | **Wire timing** |
+1. `SSL_set_fd` (and rfd/wfd) → map `SSL*` → `fd`
+2. `SSL_read` / `SSL_write` uprobes → bounded plaintext prefix (`TlsIo`)
+3. Feed `TlsIo` into the existing correlator / httparse / aggregator
 
-Dedup: same `(pid, tid)` + sub-microsecond / same-thread timestamp window. Prefer TLS content; keep syscall timestamps for latency-to-wire.
+**Latency (M3):** TLS half exit→exit (same SM semantics as Phase 2 SockIo). **Not** wire RTT.
+
+### Dual-plane TLS + syscall timing — not in Milestone 3
+
+A future enhancement could treat TLS as content and syscall sock probes as wire timing, with
+tid/ts dedup. That requires nested-syscall attribution, custom BIO / async edge cases, and is a
+**different product**. Do not sneak it into Phase 3. See
+[phase-3-implementation-plan.md](../phases/phase-3-implementation-plan.md) Q2.
 
 ## Known failure modes (document, don’t pretend solved)
 
@@ -61,6 +68,8 @@ Dedup: same `(pid, tid)` + sub-microsecond / same-thread timestamp window. Prefe
 |---|---|
 | HTTP/1.1 pipelining / out-of-order | Occasional mis-pair |
 | HTTP/2 multiplexing | fd-only pairing breaks → need stream IDs (stretch) |
+| `SSL_set_fd` never called (custom BIO) | No fd → drop TLS event (M3) |
+| rustls / Go crypto/tls / BoringSSL-only | No OpenSSL symbols → no TLS events (unsupported in M3) |
 | Connection reuse across logical services | Need container/cgroup identity (Phase 4) |
 
 Whiteboard diagram for interviews: this file + the SM above.

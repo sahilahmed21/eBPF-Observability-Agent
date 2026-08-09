@@ -55,7 +55,7 @@ Ratatui/headless are proven. Socket `read`/`write` capture, correlation SM, and 
 | Item | Owner |
 |---|---|
 | TLS uprobes / plaintext from `SSL_*` | Phase 3 |
-| TLS↔syscall dedup | Phase 3 ([correlation.md](../architecture/correlation.md)) |
+| Dual-plane TLS↔syscall wire-timing merge | **Out of Phase 3 M3** (locked Q2); post-Phase-3 if ever |
 | Service map, OTLP, DaemonSet, cgroup identity | Phase 4 |
 | HTTP/2 stream demux / gRPC | Stretch |
 | IPv6 | Deferred from Phase 1 Q4; still not required for Milestone 2 unless locked here |
@@ -386,7 +386,7 @@ exists in `docs/testing/phase-2.tdd.md` + overhead row.
 
 ### To Phase 3 (produced)
 
-- SockIO prefixes + correlation SM + httparse path; Phase 3 adds TLS content plane and dedup
+- SockIO prefixes + correlation SM + httparse path; Phase 3 adds OpenSSL `TlsIo` into the same SM (TLS-only latency; no dual-plane merge in M3)
 
 ### TDD mapping (plan task → test target)
 

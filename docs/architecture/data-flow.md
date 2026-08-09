@@ -35,11 +35,12 @@ Keep events **small and fixed-layout** (verifier + RingBuf friendly). Grow field
 |---|---|---|
 | `ConnectEnter` / `ConnectExit` | pid, tgid, ts, fd, ret, latency_ns, addrs | 1 |
 | `AcceptExit` | same family | 1 |
-| `SockIO` | pid, fd, dir (r/w), len, prefix\[N\] | 2 |
-| `TlsIO` | pid, tid, dir, len, prefix\[N\], ssl_ptr | 3 |
+| `SockIO` | pid, tgid, fd, dir (r/w), len, prefix\[256\] | 2 |
+| `TlsIO` | twin of SockIO (`EventKind::TlsIo`); fd from `SSL_set_fd` map | 3 |
 | `DropStats` (userspace poll of map) | dropped event count | 1+ |
 
-Exact Rust/`aya` structs live in `common/` once Phase 0 scaffolds the workspace.
+Exact Rust/`aya` structs live in `common/`. Phase 3 M3: TLS-only latency into the same correlator —
+no dual-plane wire-timing merge.
 
 ## Aggregation windows
 

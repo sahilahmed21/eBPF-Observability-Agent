@@ -30,19 +30,22 @@ Inventory of attachments the agent will use. Prefer **tracepoints** when a stabl
 - Cap `N` (256–512) to respect map value / stack limits.
 - Optional: target TGID allowlist for MVP (single process) before going system-wide.
 
-## Phase 3 — TLS
+## Phase 3 — TLS (OpenSSL / Milestone 3)
 
 | Kind | Attach point | Capture |
 |------|--------------|---------|
-| Uprobe | `SSL_write` in `libssl.so.3` / `libssl.so.1.1` | plaintext `buf`, `num` |
-| Uprobe | `SSL_read` (uretprobe for return length) | decrypted plaintext |
+| Uprobe | `SSL_set_fd` / `SSL_set_rfd` / `SSL_set_wfd` | `SSL*` → fd map |
+| Uprobe + uretprobe | `SSL_write` / `SSL_write_ex` | enter stash / exit plaintext prefix |
+| Uprobe + uretprobe | `SSL_read` / `SSL_read_ex` | enter stash / exit decrypted plaintext |
 
-**Attach discovery**
+**Note:** OpenSSL 3 / CPython call `SSL_*_ex`; classic `SSL_read`/`SSL_write` remain attached for older callers.
 
-1. Resolve target PIDs (or scan `/proc`).
-2. Find mapped `libssl` path from `/proc/<pid>/maps`.
-3. Resolve symbol offset; `UProbe::attach`.
-4. Handle missing symbols (BoringSSL, LibreSSL, static OpenSSL, Go `crypto/tls`) as **unsupported** with a clear log — document, don’t pretend.
+**Attach (M3 locked)**
+
+1. Try-attach host `libssl.so.3` and `libssl.so.1.1` (candidate paths).
+2. Soft-fail if missing — cleartext Phase 2 must keep working.
+3. Handle BoringSSL / LibreSSL / static OpenSSL / Go `crypto/tls` / rustls as **unsupported** with a clear log — document, don’t pretend.
+4. Skip Phase 2 sock I/O on TLS-marked fds. **No** dual-plane TLS↔syscall timing merge in M3.
 
 ## Stretch — profiling
 

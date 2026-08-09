@@ -17,9 +17,12 @@ Document actual caps used in `deploy/k8s/` when Phase 4 lands.
 
 ## Data handling
 
-Before any export off-node:
+**Phase 3 / Milestone 3 (locked):** metrics-only UI; **never log raw prefixes**. Secrets may still
+exist briefly in RingBuf/correlator RAM — treat the agent process as the trust boundary.
 
-1. Strip `Authorization`, `Cookie`, `Set-Cookie`.
+Before any export off-node (Phase 4 OTLP and any future payload sinks):
+
+1. Strip `Authorization`, `Cookie`, `Set-Cookie` (`redact_headers` in agent).
 2. Redact common secret patterns (API keys, bearer tokens, card-like numbers — best-effort regex).
 3. Prefer metrics + sanitized span attributes over raw payloads in production configs.
 

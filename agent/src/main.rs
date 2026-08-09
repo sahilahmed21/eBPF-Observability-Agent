@@ -4,13 +4,15 @@ mod decode;
 mod http;
 mod http_agg;
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agg::Aggregator;
 use anyhow::Context as _;
 use aya::maps::{Array, MapData, RingBuf};
-use aya::programs::{KProbe, TracePoint};
+use aya::programs::uprobe::UProbeScope;
+use aya::programs::{KProbe, TracePoint, UProbe};
 use correlate::Correlator;
 use decode::{DecodedEvent, decode_event};
 use http::parse_exchange;
@@ -93,6 +95,9 @@ async fn main() -> anyhow::Result<()> {
     attach_tp(&mut ebpf, "enter_recvfrom", "syscalls", "sys_enter_recvfrom")?;
     attach_tp(&mut ebpf, "exit_recvfrom", "syscalls", "sys_exit_recvfrom")?;
 
+    // Phase 3 Q5/Q6/Q12: try-attach libssl; soft-fail keeps cleartext working.
+    attach_openssl_uprobes(&mut ebpf);
+
     let events_map = ebpf
         .take_map("EVENTS")
         .context("EVENTS map missing")?;
@@ -109,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
     let rates = Arc::new(Mutex::new(Vec::new()));
     let drop_count = Arc::new(Mutex::new(0u64));
     let sockio_count = Arc::new(Mutex::new(0u64));
+    let tlsio_count = Arc::new(Mutex::new(0u64));
 
     let tcp_rb = Arc::clone(&tcp_agg);
     let http_rb = Arc::clone(&http_agg);
@@ -116,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
     let rates_rb = Arc::clone(&rates);
     let drop_rb = Arc::clone(&drop_count);
     let sockio_rb = Arc::clone(&sockio_count);
+    let tlsio_rb = Arc::clone(&tlsio_count);
     let mut poll = AsyncFd::with_interest(ring, tokio::io::Interest::READABLE)?;
     tokio::task::spawn(async move {
         let mut events_in_tick = 0u64;
@@ -146,6 +153,14 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
+                            DecodedEvent::TlsIo(ev) => {
+                                *lock_mut(&tlsio_rb) += 1;
+                                if let Some(ex) = lock_mut(&corr_rb).observe(&ev, now) {
+                                    if let Some(parsed) = parse_exchange(&ex) {
+                                        lock_mut(&http_rb).record(&parsed, now);
+                                    }
+                                }
+                            }
                         }
                         events_in_tick += 1;
                     }
@@ -168,11 +183,11 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    info!("Phase 2 agent running (TCP + HTTP). q quit, t toggle view.");
+    info!("Phase 3 agent running (TCP + HTTP + TLS). q quit, t toggle view.");
     let headless = std::env::var_os("OBSAGENT_HEADLESS").is_some()
         || !std::io::IsTerminal::is_terminal(&std::io::stdout());
     if headless {
-        run_headless(tcp_agg, http_agg, drop_count, sockio_count).await?;
+        run_headless(tcp_agg, http_agg, drop_count, sockio_count, tlsio_count).await?;
     } else {
         run_tui(tcp_agg, http_agg, rates, drop_count).await?;
     }
@@ -196,6 +211,93 @@ fn attach_tp(
     Ok(())
 }
 
+/// Phase 3 Q5: try-attach `libssl.so.3` / `libssl.so.1.1`. Q6/Q12: soft-fail.
+fn attach_openssl_uprobes(ebpf: &mut aya::Ebpf) {
+    const CANDIDATES: &[&str] = &[
+        "/lib/x86_64-linux-gnu/libssl.so.3",
+        "/usr/lib/x86_64-linux-gnu/libssl.so.3",
+        "/lib/x86_64-linux-gnu/libssl.so.1.1",
+        "/usr/lib/x86_64-linux-gnu/libssl.so.1.1",
+    ];
+
+    for name in [
+        "enter_ssl_set_fd",
+        "enter_ssl_write",
+        "exit_ssl_write",
+        "enter_ssl_read",
+        "exit_ssl_read",
+        "enter_ssl_write_ex",
+        "exit_ssl_write_ex",
+        "enter_ssl_read_ex",
+        "exit_ssl_read_ex",
+    ] {
+        if let Err(e) = load_uprobe(ebpf, name) {
+            warn!("failed to load {name}: {e:#} (continuing; cleartext still active)");
+            return;
+        }
+    }
+
+    let mut attached_any = false;
+    for path in CANDIDATES {
+        if !Path::new(path).exists() {
+            continue;
+        }
+        let required = [
+            ("enter_ssl_set_fd", "SSL_set_fd"),
+            ("enter_ssl_write", "SSL_write"),
+            ("exit_ssl_write", "SSL_write"),
+            ("enter_ssl_read", "SSL_read"),
+            ("exit_ssl_read", "SSL_read"),
+            ("enter_ssl_write_ex", "SSL_write_ex"),
+            ("exit_ssl_write_ex", "SSL_write_ex"),
+            ("enter_ssl_read_ex", "SSL_read_ex"),
+            ("exit_ssl_read_ex", "SSL_read_ex"),
+        ];
+        let mut path_ok = true;
+        for (prog, sym) in required {
+            if let Err(e) = attach_uprobe(ebpf, prog, sym, path) {
+                warn!("attach {prog} → {sym} in {path}: {e:#}");
+                path_ok = false;
+                break;
+            }
+        }
+        if !path_ok {
+            continue;
+        }
+        // Optional: same program on rfd/wfd (some stacks only call these).
+        for sym in ["SSL_set_rfd", "SSL_set_wfd"] {
+            if let Err(e) = attach_uprobe(ebpf, "enter_ssl_set_fd", sym, path) {
+                debug!("optional {sym} in {path}: {e:#}");
+            }
+        }
+        info!("attached OpenSSL uprobes to {path}");
+        attached_any = true;
+    }
+    if !attached_any {
+        warn!("no libssl uprobes attached (Q6/Q12 soft-fail); cleartext HTTP still active");
+    }
+}
+
+fn load_uprobe(ebpf: &mut aya::Ebpf, name: &str) -> anyhow::Result<()> {
+    let program: &mut UProbe = ebpf
+        .program_mut(name)
+        .with_context(|| format!("program {name}"))?
+        .try_into()?;
+    program.load()?;
+    Ok(())
+}
+
+fn attach_uprobe(ebpf: &mut aya::Ebpf, name: &str, symbol: &str, lib: &str) -> anyhow::Result<()> {
+    let program: &mut UProbe = ebpf
+        .program_mut(name)
+        .with_context(|| format!("program {name}"))?
+        .try_into()?;
+    program
+        .attach(symbol, lib, UProbeScope::AllProcesses)
+        .with_context(|| format!("attach {name} → {symbol} in {lib}"))?;
+    Ok(())
+}
+
 fn lock_mut<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -205,6 +307,7 @@ async fn run_headless(
     http_agg: Arc<Mutex<HttpAggregator>>,
     drop_count: Arc<Mutex<u64>>,
     sockio_count: Arc<Mutex<u64>>,
+    tlsio_count: Arc<Mutex<u64>>,
 ) -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -219,8 +322,9 @@ async fn run_headless(
                 let http_total: u64 = http_rows.iter().map(|(_, r)| r.count).sum();
                 let drops = *lock_mut(&drop_count);
                 let sockio = *lock_mut(&sockio_count);
+                let tlsio = *lock_mut(&tlsio_count);
                 println!(
-                    "events_60s={tcp_total} tcp_60s={tcp_total} http_60s={http_total} sockio={sockio} drops={drops}"
+                    "events_60s={tcp_total} tcp_60s={tcp_total} http_60s={http_total} sockio={sockio} tlsio={tlsio} drops={drops}"
                 );
                 for (k, r) in http_rows.iter().take(8) {
                     println!(
@@ -375,7 +479,7 @@ fn draw_http(
         .split(f.area());
 
     let header = Paragraph::new(format!(
-        "obsagent Phase 2 — HTTP endpoints (60s) | drops={drops} | t toggle | q quit\nQ8: latency = request-half exit → response-half exit; metrics only (Q14)"
+        "obsagent Phase 3 — HTTP/HTTPS endpoints (60s) | drops={drops} | t toggle | q quit\nTLS-only latency (Q2); metrics only — never log raw prefixes (Q11)"
     ))
     .block(Block::default().borders(Borders::ALL).title("status"));
     f.render_widget(header, chunks[0]);

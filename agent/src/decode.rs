@@ -1,14 +1,16 @@
-//! RingBuf demux (Phase 2 Q5): kind byte selects payload layout.
+//! RingBuf demux (Phase 2 Q5 / Phase 3 Q3): kind byte selects payload layout.
 
 use obsagent_common::{
     EventKind, SOCK_IO_EVENT_SIZE, SOCK_IO_PREFIX_LEN, SOCK_LATENCY_EVENT_SIZE, SockIoEvent,
-    SockLatencyEvent,
+    SockLatencyEvent, TLS_IO_EVENT_SIZE,
 };
 
 #[derive(Clone, Copy, Debug)]
 pub enum DecodedEvent {
     Latency(SockLatencyEvent),
     Io(SockIoEvent),
+    /// Same layout as [`SockIoEvent`]; `kind == TlsIo`.
+    TlsIo(SockIoEvent),
 }
 
 /// Decode a RingBuf record. Returns `None` if too short or unknown kind.
@@ -28,27 +30,30 @@ pub fn decode_event(bytes: &[u8]) -> Option<DecodedEvent> {
             }
             Some(DecodedEvent::Latency(ev))
         }
-        EventKind::SockIo => {
-            if bytes.len() < SOCK_IO_EVENT_SIZE {
-                return None;
-            }
-            let mut ev =
-                unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<SockIoEvent>()) };
-            if ev.kind != EventKind::SockIo as u8 {
-                return None;
-            }
-            if ev.prefix_len as usize > SOCK_IO_PREFIX_LEN {
-                ev.prefix_len = SOCK_IO_PREFIX_LEN as u16;
-            }
-            Some(DecodedEvent::Io(ev))
-        }
+        EventKind::SockIo => Some(DecodedEvent::Io(decode_io(bytes, EventKind::SockIo)?)),
+        EventKind::TlsIo => Some(DecodedEvent::TlsIo(decode_io(bytes, EventKind::TlsIo)?)),
     }
+}
+
+fn decode_io(bytes: &[u8], expect: EventKind) -> Option<SockIoEvent> {
+    if bytes.len() < SOCK_IO_EVENT_SIZE {
+        return None;
+    }
+    debug_assert_eq!(SOCK_IO_EVENT_SIZE, TLS_IO_EVENT_SIZE);
+    let mut ev = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<SockIoEvent>()) };
+    if ev.kind != expect as u8 {
+        return None;
+    }
+    if ev.prefix_len as usize > SOCK_IO_PREFIX_LEN {
+        ev.prefix_len = SOCK_IO_PREFIX_LEN as u16;
+    }
+    Some(ev)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obsagent_common::{EventKind, IoDir, SOCK_IO_PREFIX_LEN};
+    use obsagent_common::{EventKind, IoDir, SOCK_IO_PREFIX_LEN, TLS_IO_EVENT_SIZE};
 
     #[test]
     fn decodes_latency_connect() {
@@ -134,6 +139,39 @@ mod tests {
         match decode_event(bytes) {
             Some(DecodedEvent::Io(out)) => {
                 assert_eq!(out.prefix_len as usize, SOCK_IO_PREFIX_LEN);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_tls_io() {
+        let ev = SockIoEvent {
+            kind: EventKind::TlsIo as u8,
+            dir: IoDir::Write as u8,
+            prefix_len: 4,
+            fd: 7,
+            pid: 1,
+            tgid: 2,
+            ret: 4,
+            ts_ns: 42,
+            prefix: {
+                let mut p = [0u8; SOCK_IO_PREFIX_LEN];
+                p[..4].copy_from_slice(b"GET ");
+                p
+            },
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&ev as *const SockIoEvent).cast::<u8>(),
+                TLS_IO_EVENT_SIZE,
+            )
+        };
+        match decode_event(bytes) {
+            Some(DecodedEvent::TlsIo(out)) => {
+                assert_eq!(out.fd, 7);
+                assert_eq!(out.kind, EventKind::TlsIo as u8);
+                assert_eq!(&out.prefix[..4], b"GET ");
             }
             other => panic!("unexpected {other:?}"),
         }

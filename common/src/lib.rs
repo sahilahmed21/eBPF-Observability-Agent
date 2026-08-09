@@ -1,4 +1,5 @@
-//! Kernel ↔ userspace ABI for sock latency (Phase 1) and sock I/O (Phase 2).
+//! Kernel ↔ userspace ABI for sock latency (Phase 1), sock I/O (Phase 2),
+//! and TLS I/O (Phase 3).
 //!
 //! # Latency semantics (Q7 / Phase 1)
 //! `SockLatencyEvent::latency_ns` is syscall enter→exit only (`bpf_ktime_get_ns` delta).
@@ -8,6 +9,10 @@
 //! # HTTP latency (Q8 / Phase 2)
 //! Application HTTP latency is reconstructed in userspace from `SockIoEvent`
 //! pairs: request-half exit `ts_ns` → response-half exit `ts_ns`.
+//!
+//! # HTTPS latency (Phase 3 Q2)
+//! Same SM over [`TlsIoEvent`] (layout twin of [`SockIoEvent`]): TLS half exit→exit.
+//! Dual-plane wire timing is out of Milestone 3.
 
 #![no_std]
 
@@ -25,14 +30,17 @@ pub const SOCK_IO_PREFIX_LEN: usize = 256;
 
 /// Direction / event kind.
 ///
-/// RingBuf demux (Phase 2 Q5): first byte of each reserved record is `EventKind`.
-/// `Connect`/`Accept` → [`SockLatencyEvent`] (48 B). `SockIo` → [`SockIoEvent`] (288 B).
+/// RingBuf demux (Phase 2 Q5 / Phase 3 Q3): first byte of each reserved record is `EventKind`.
+/// `Connect`/`Accept` → [`SockLatencyEvent`] (48 B).
+/// `SockIo` / `TlsIo` → [`SockIoEvent`] / [`TlsIoEvent`] (288 B twins).
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EventKind {
     Connect = 1,
     Accept = 2,
     SockIo = 3,
+    /// OpenSSL plaintext prefix (Phase 3 Q3).
+    TlsIo = 4,
 }
 
 impl EventKind {
@@ -41,6 +49,7 @@ impl EventKind {
             1 => Some(Self::Connect),
             2 => Some(Self::Accept),
             3 => Some(Self::SockIo),
+            4 => Some(Self::TlsIo),
             _ => None,
         }
     }
@@ -111,6 +120,11 @@ pub struct SockIoEvent {
 
 pub const SOCK_IO_EVENT_SIZE: usize = core::mem::size_of::<SockIoEvent>();
 
+/// Phase 3 Q3: layout twin of [`SockIoEvent`]; `kind` must be [`EventKind::TlsIo`].
+pub type TlsIoEvent = SockIoEvent;
+
+pub const TLS_IO_EVENT_SIZE: usize = SOCK_IO_EVENT_SIZE;
+
 /// Enter-side pending record (HashMap value). Not sent on the RingBuf.
 ///
 /// Connect: `daddr_be`/`dport_be` filled on enter (`has_addr=1`).
@@ -137,6 +151,20 @@ pub struct PendingIo {
     pub _pad: [u8; 3],
 }
 
+/// Enter-side pending for TLS I/O (Phase 3 Q7). Not sent on the RingBuf.
+///
+/// `ssl_ptr` is looked up in `SSL_FD` on exit to recover `fd` (Q1).
+/// `outlen_ptr` is non-zero for `SSL_{read,write}_ex` (points at `size_t` result).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PendingTls {
+    pub buf_ptr: u64,
+    pub ssl_ptr: u64,
+    pub outlen_ptr: u64,
+    pub dir: u8,
+    pub _pad: [u8; 7],
+}
+
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for SockLatencyEvent {}
 
@@ -148,6 +176,9 @@ unsafe impl aya::Pod for PendingEnter {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for PendingIo {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for PendingTls {}
 
 #[cfg(test)]
 mod tests {
@@ -164,8 +195,9 @@ mod tests {
         assert_eq!(EventKind::from_u8(1), Some(EventKind::Connect));
         assert_eq!(EventKind::from_u8(2), Some(EventKind::Accept));
         assert_eq!(EventKind::from_u8(3), Some(EventKind::SockIo));
+        assert_eq!(EventKind::from_u8(4), Some(EventKind::TlsIo));
         assert_eq!(EventKind::from_u8(0), None);
-        assert_eq!(EventKind::from_u8(4), None);
+        assert_eq!(EventKind::from_u8(5), None);
     }
 
     #[test]
@@ -231,5 +263,22 @@ mod tests {
         assert_ne!(SOCK_LATENCY_EVENT_SIZE, SOCK_IO_EVENT_SIZE);
         assert_eq!(EventKind::Connect as u8, 1);
         assert_eq!(EventKind::SockIo as u8, 3);
+        assert_eq!(EventKind::TlsIo as u8, 4);
+    }
+
+    // --- Phase 3 TlsIo ABI (Q3 twin, Q4=256) ---
+
+    #[test]
+    fn tls_io_is_sock_io_twin() {
+        assert_eq!(TLS_IO_EVENT_SIZE, SOCK_IO_EVENT_SIZE);
+        assert_eq!(TLS_IO_EVENT_SIZE, 288);
+        assert_eq!(core::mem::size_of::<TlsIoEvent>(), core::mem::size_of::<SockIoEvent>());
+        assert_eq!(core::mem::align_of::<TlsIoEvent>(), 8);
+    }
+
+    #[test]
+    fn pending_tls_layout() {
+        assert_eq!(core::mem::size_of::<PendingTls>(), 32);
+        assert_eq!(core::mem::align_of::<PendingTls>(), 8);
     }
 }

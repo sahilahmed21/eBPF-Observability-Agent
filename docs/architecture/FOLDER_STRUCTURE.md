@@ -45,7 +45,7 @@ Userspace binary that loads BPF and serves CLI / export.
 | `src/main.rs` | CLI args, runtime bootstrap |
 | `src/loader.rs` | `Ebpf::load`, attach probes, resolve libssl |
 | `src/consumer/` | Tokio RingBuf reader, batching |
-| `src/correlation/` | Per-socket FSM, TLS merge |
+| `src/correlation/` | Per-socket FSM (Phase 2); TlsIo feeds same SM in Phase 3 |
 | `src/http/` | `httparse`, path normalization |
 | `src/hist/` | Rolling histograms |
 | `src/identity/` | `/proc` cgroup → container/pod |
@@ -111,7 +111,7 @@ Developer UX: BTF check, loadgen, overhead sampling. Keep these runnable without
 Phase 0:  common (minimal) + ebpf hello + agent loader stub + xtask
 Phase 1:  ebpf/connect + socket + agent/consumer + dashboard
 Phase 2:  ebpf/http_capture + agent/http + correlation + hist
-Phase 3:  ebpf/tls + agent redaction + TLS merge in correlation
+Phase 3:  ebpf TLS uprobes + TlsIo → existing correlator (TLS-only; no dual-plane merge)
 Phase 4:  identity + service_map + otel + deploy/
 Stretch:  http2 module, profiling module
 ```
