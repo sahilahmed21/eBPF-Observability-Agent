@@ -34,6 +34,12 @@ static PENDING_IO: HashMap<u32, PendingIo> =
 static PENDING_TLS: HashMap<u32, PendingTls> =
     HashMap::<u32, PendingTls>::with_max_entries(PENDING_MAP_ENTRIES, 0);
 
+/// Separate from `PENDING_TLS` so classic `SSL_read`/`SSL_write` and `_ex`
+/// on the same tid cannot clobber each other.
+#[map]
+static PENDING_TLS_EX: HashMap<u32, PendingTls> =
+    HashMap::<u32, PendingTls>::with_max_entries(PENDING_MAP_ENTRIES, 0);
+
 /// Q4: fds observed via connect/accept (process fd table). Key = (tgid, fd).
 #[map]
 static SOCK_FDS: HashMap<u64, u8> =
@@ -43,6 +49,11 @@ static SOCK_FDS: HashMap<u64, u8> =
 #[map]
 static SSL_FD: HashMap<u64, i32> =
     HashMap::<u64, i32>::with_max_entries(PENDING_MAP_ENTRIES, 0);
+
+/// Reverse of `SSL_FD` for close/`SSL_free` cleanup. Key = (tgid, fd) → ssl*.
+#[map]
+static FD_SSL: HashMap<u64, u64> =
+    HashMap::<u64, u64>::with_max_entries(PENDING_MAP_ENTRIES, 0);
 
 /// Phase 3 Q8: fds known to be TLS — skip Phase 2 sock I/O. Key = (tgid, fd).
 #[map]
@@ -94,6 +105,42 @@ fn unmark_sock_fd(fd: u32) {
     let key = sock_fd_key(tgid, fd);
     let _ = SOCK_FDS.remove(&key);
     let _ = TLS_FDS.remove(&key);
+    clear_ssl_for_fd_key(key, fd as i32);
+}
+
+fn clear_ssl_for_fd_key(key: u64, fd: i32) {
+    let Some(ssl) = (unsafe { FD_SSL.get(&key) }) else {
+        return;
+    };
+    let ssl = *ssl;
+    let _ = FD_SSL.remove(&key);
+    if let Some(mapped) = unsafe { SSL_FD.get(&ssl) } {
+        if *mapped == fd {
+            let _ = SSL_FD.remove(&ssl);
+        }
+    }
+}
+
+fn clear_ssl_ptr(ssl: u64) {
+    if ssl == 0 {
+        return;
+    }
+    let Some(fd) = (unsafe { SSL_FD.get(&ssl) }) else {
+        return;
+    };
+    let fd = *fd;
+    let _ = SSL_FD.remove(&ssl);
+    if fd < 0 {
+        return;
+    }
+    let (tgid, _) = pid_tgid();
+    let key = sock_fd_key(tgid, fd as u32);
+    if let Some(mapped) = unsafe { FD_SSL.get(&key) } {
+        if *mapped == ssl {
+            let _ = FD_SSL.remove(&key);
+            let _ = TLS_FDS.remove(&key);
+        }
+    }
 }
 
 fn is_marked_sock_fd(fd: u32) -> bool {
@@ -490,8 +537,39 @@ fn try_enter_ssl_set_fd(ctx: &ProbeContext) -> Result<(), u32> {
     if ssl == 0 || fd < 0 {
         return Ok(());
     }
+    // Drop stale reverse map if this SSL* was rebound to another fd.
+    if let Some(old_fd) = unsafe { SSL_FD.get(&ssl) } {
+        let old_fd = *old_fd;
+        if old_fd >= 0 && old_fd != fd {
+            let (tgid, _) = pid_tgid();
+            let old_key = sock_fd_key(tgid, old_fd as u32);
+            if let Some(mapped) = unsafe { FD_SSL.get(&old_key) } {
+                if *mapped == ssl {
+                    let _ = FD_SSL.remove(&old_key);
+                    let _ = TLS_FDS.remove(&old_key);
+                }
+            }
+        }
+    }
     let _ = SSL_FD.insert(&ssl, &fd, 0);
+    let (tgid, _) = pid_tgid();
+    let key = sock_fd_key(tgid, fd as u32);
+    let _ = FD_SSL.insert(&key, &ssl, 0);
     mark_tls_fd(fd);
+    Ok(())
+}
+
+#[uprobe]
+pub fn enter_ssl_free(ctx: ProbeContext) -> u32 {
+    match try_enter_ssl_free(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+fn try_enter_ssl_free(ctx: &ProbeContext) -> Result<(), u32> {
+    let ssl: u64 = ctx.arg(0).ok_or(1u32)?;
+    clear_ssl_ptr(ssl);
     Ok(())
 }
 
@@ -566,17 +644,35 @@ fn try_enter_ssl_io_ex(ctx: &ProbeContext, dir: IoDir) -> Result<(), u32> {
         dir: dir as u8,
         _pad: [0; 7],
     };
-    PENDING_TLS.insert(&tid(), &pending, 0).map_err(|_| 1u32)?;
+    PENDING_TLS_EX.insert(&tid(), &pending, 0).map_err(|_| 1u32)?;
     Ok(())
 }
 
 fn try_exit_ssl_io(ctx: &RetProbeContext) -> Result<(), u32> {
+    try_exit_ssl_pending(ctx, false)
+}
+
+fn try_exit_ssl_io_ex(ctx: &RetProbeContext) -> Result<(), u32> {
+    try_exit_ssl_pending(ctx, true)
+}
+
+fn try_exit_ssl_pending(ctx: &RetProbeContext, is_ex: bool) -> Result<(), u32> {
     let tid = tid();
-    let Some(pending) = (unsafe { PENDING_TLS.get(&tid) }) else {
-        return Ok(());
+    let pending = if is_ex {
+        let Some(pending) = (unsafe { PENDING_TLS_EX.get(&tid) }) else {
+            return Ok(());
+        };
+        let pending = *pending;
+        let _ = PENDING_TLS_EX.remove(&tid);
+        pending
+    } else {
+        let Some(pending) = (unsafe { PENDING_TLS.get(&tid) }) else {
+            return Ok(());
+        };
+        let pending = *pending;
+        let _ = PENDING_TLS.remove(&tid);
+        pending
     };
-    let pending = *pending;
-    let _ = PENDING_TLS.remove(&tid);
 
     let Some(fd) = (unsafe { SSL_FD.get(&pending.ssl_ptr) }) else {
         // Q1: drop if fd unknown.
@@ -618,7 +714,7 @@ pub fn enter_ssl_write_ex(ctx: ProbeContext) -> u32 {
 
 #[uretprobe]
 pub fn exit_ssl_write_ex(ctx: RetProbeContext) -> u32 {
-    match try_exit_ssl_io(&ctx) {
+    match try_exit_ssl_io_ex(&ctx) {
         Ok(()) => 0,
         Err(_) => 1,
     }
@@ -634,7 +730,7 @@ pub fn enter_ssl_read_ex(ctx: ProbeContext) -> u32 {
 
 #[uretprobe]
 pub fn exit_ssl_read_ex(ctx: RetProbeContext) -> u32 {
-    match try_exit_ssl_io(&ctx) {
+    match try_exit_ssl_io_ex(&ctx) {
         Ok(()) => 0,
         Err(_) => 1,
     }

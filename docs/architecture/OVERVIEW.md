@@ -1,5 +1,7 @@
 # Architecture overview
 
+**Full tour (code flows, file catalog, mermaid diagrams):** [PROJECT-DEEP-DIVE.md](PROJECT-DEEP-DIVE.md).
+
 ## Goal
 
 Zero-instrumentation observability: reconstruct HTTP/gRPC latency and a service map from kernel + TLS-library probes only. No SDKs in target apps.

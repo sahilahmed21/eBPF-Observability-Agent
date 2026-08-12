@@ -2,6 +2,8 @@
 
 **Purpose:** Drop this file into a new chat so another agent (or you) can resume without rediscovering context.
 
+> **Superseded for “what’s next”:** Phase 3 is done — use **`docs/handoff/SESSION-2026-08-10-phase-3.md`**. This file remains valid for Phase 2 context.
+
 **Session dates:** 2026-08-07 (Phase 2 plan → execute → brutal review → fix-all)  
 **Repo:** `c:\projects\eBPF-Observability-Agent` (Windows checkout; build/run on **WSL2 Ubuntu**)  
 **Git tip (committed):** `main` @ `b7aeb06` — *feat: Phase 1 connect/accept latency MVP with RingBuf CLI*  

@@ -14,7 +14,7 @@
 | Task | Command / test | Result |
 |---|---|---|
 | 3.1 TlsIo ABI | `wsl-run.sh test-common` | 12 passed (TlsIo twin, PendingTls 32 B) |
-| 3.2/3.3 decode + wire | `wsl-run.sh test-agent` | 21 passed (`decodes_tls_io`, correlator reuse) |
+| 3.2/3.3 decode + wire | `wsl-run.sh test-agent` | 23 passed (`decodes_tls_io`, `observe_client`, correlator reuse) |
 | Q15 attach | `wsl-run.sh smoke3` | PASS `exit_ssl_write_ex` + `enter_ssl_set_fd` |
 | TLS HTTP rows | smoke3 | PASS `tlsio=` + `GET /…` rows |
 | Q10 correctness | `wsl-run.sh correctness3` | PASS p50≈50.95ms vs delay=50ms |
@@ -41,4 +41,5 @@ Milestone 3 attaches both classic and `_ex` symbols. Testdata is Python stdlib s
 - Dual-plane wire timing: out of M3 (Q2).
 - Go/rustls/BoringSSL: unsupported.
 - Full Q13 long load: not claimed; quick sample only.
-- `SSL_free` map cleanup: not hooked (stale SSL_FD entries until map pressure).
+- `SSL_free` + `close`: clear `SSL_FD` / `FD_SSL` / `TLS_FDS` (reverse map on close).
+- TLS HTTP pairing is **client-only** (write→read) so same-host OpenSSL client+server does not double-count.

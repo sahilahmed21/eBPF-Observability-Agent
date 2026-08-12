@@ -59,6 +59,8 @@ Hard parts:
 
 Full design: [`docs/architecture/`](docs/architecture/).
 
+**Start here for a full tour (flows, files, mermaid):** [`docs/architecture/PROJECT-DEEP-DIVE.md`](docs/architecture/PROJECT-DEEP-DIVE.md).
+
 **Correlation key (no request ID):** `(pid, fd, 4-tuple)` + per-socket state machine. Phase 2 uses sock I/O prefixes; Phase 3 feeds OpenSSL plaintext (`TlsIo`) into the **same** SM after `SSL_set_fd`→fd mapping (TLS-only latency in M3 — not dual-plane wire timing). See [correlation.md](docs/architecture/correlation.md).
 
 **Backpressure default:** sample/drop in-kernel with a **drop-counter metric** (option a). Bigger buffers only delay the problem. See [ring-buffer-backpressure.md](docs/architecture/ring-buffer-backpressure.md).

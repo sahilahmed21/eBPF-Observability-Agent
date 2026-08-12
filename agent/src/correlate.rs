@@ -9,6 +9,8 @@
 //! - Partial `recvfrom` slices that do not start with a method/`HTTP/` are dropped
 //!   in-kernel; mid-stream chunks never join an exchange.
 //! - Server responses via `sendmsg`/`writev` are not probed (Phase 2 attach set).
+//! - TLS (`observe_client`): only write→read pairing so same-host OpenSSL
+//!   client+server does not double-count HTTP rates.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -64,7 +66,23 @@ pub struct Correlator {
 }
 
 impl Correlator {
+    /// Cleartext sock I/O: accept client (write→read) or server (read→write) pairing.
     pub fn observe(&mut self, ev: &SockIoEvent, now: Instant) -> Option<Exchange> {
+        self.observe_inner(ev, now, false)
+    }
+
+    /// TLS I/O: client-only (write→read). Same-host OpenSSL client+server both emit
+    /// TlsIo; counting both doubles HTTP rates. Server read→write is ignored.
+    pub fn observe_client(&mut self, ev: &SockIoEvent, now: Instant) -> Option<Exchange> {
+        self.observe_inner(ev, now, true)
+    }
+
+    fn observe_inner(
+        &mut self,
+        ev: &SockIoEvent,
+        now: Instant,
+        client_only: bool,
+    ) -> Option<Exchange> {
         self.evict_stale(now);
 
         let dir = IoDir::from_u8(ev.dir)?;
@@ -75,7 +93,9 @@ impl Correlator {
         match self.states.remove(&key) {
             None => {
                 if ev.ret < 0 || plen == 0 || !looks_like_request(&prefix) {
-                    // Only start an exchange on a request-looking half.
+                    return None;
+                }
+                if client_only && dir != IoDir::Write {
                     return None;
                 }
                 self.states.insert(
@@ -90,13 +110,19 @@ impl Correlator {
                 None
             }
             Some(pending) => {
-                let opposite = matches!(
-                    (pending.dir, dir),
-                    (IoDir::Write, IoDir::Read) | (IoDir::Read, IoDir::Write)
-                );
+                let opposite = if client_only {
+                    matches!((pending.dir, dir), (IoDir::Write, IoDir::Read))
+                } else {
+                    matches!(
+                        (pending.dir, dir),
+                        (IoDir::Write, IoDir::Read) | (IoDir::Read, IoDir::Write)
+                    )
+                };
                 if !opposite || ev.ret < 0 || !looks_like_response(&prefix) {
-                    // Restart only if this event is a new request half.
-                    if ev.ret >= 0 && looks_like_request(&prefix) {
+                    if ev.ret >= 0
+                        && looks_like_request(&prefix)
+                        && (!client_only || dir == IoDir::Write)
+                    {
                         self.states.insert(
                             key,
                             Pending {
@@ -110,7 +136,6 @@ impl Correlator {
                     return None;
                 }
 
-                // pending must already be request-shaped (enforced on insert).
                 Some(Exchange {
                     tgid: key.tgid,
                     fd: key.fd,
@@ -200,6 +225,38 @@ mod tests {
             .observe(&io(IoDir::Write, 7, 500, b"HTTP/1.1 201 Created\r\n"), now)
             .expect("exchange");
         assert_eq!(ex.latency_ns(), 490);
+    }
+
+    #[test]
+    fn client_only_ignores_server_read_then_write() {
+        let mut c = Correlator::default();
+        let now = Instant::now();
+        assert!(c
+            .observe_client(&io(IoDir::Read, 7, 10, b"POST /x HTTP/1.1\r\n"), now)
+            .is_none());
+        assert!(c
+            .observe_client(
+                &io(IoDir::Write, 7, 500, b"HTTP/1.1 201 Created\r\n"),
+                now,
+            )
+            .is_none());
+        assert_eq!(c.pending_len(), 0);
+    }
+
+    #[test]
+    fn client_only_write_then_read_emits() {
+        let mut c = Correlator::default();
+        let now = Instant::now();
+        assert!(c
+            .observe_client(&io(IoDir::Write, 3, 1_000, b"GET / HTTP/1.1\r\n"), now)
+            .is_none());
+        let ex = c
+            .observe_client(
+                &io(IoDir::Read, 3, 1_050_000_000, b"HTTP/1.1 200 OK\r\n"),
+                now,
+            )
+            .expect("exchange");
+        assert_eq!(ex.latency_ns(), 1_050_000_000 - 1_000);
     }
 
     #[test]

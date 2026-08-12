@@ -8,6 +8,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use std::collections::HashSet;
+use std::os::unix::fs::MetadataExt;
+
 use agg::Aggregator;
 use anyhow::Context as _;
 use aya::maps::{Array, MapData, RingBuf};
@@ -155,7 +158,8 @@ async fn main() -> anyhow::Result<()> {
                             }
                             DecodedEvent::TlsIo(ev) => {
                                 *lock_mut(&tlsio_rb) += 1;
-                                if let Some(ex) = lock_mut(&corr_rb).observe(&ev, now) {
+                                // Client-only: same-host OpenSSL server halves would 2× rates.
+                                if let Some(ex) = lock_mut(&corr_rb).observe_client(&ev, now) {
                                     if let Some(parsed) = parse_exchange(&ex) {
                                         lock_mut(&http_rb).record(&parsed, now);
                                     }
@@ -220,38 +224,67 @@ fn attach_openssl_uprobes(ebpf: &mut aya::Ebpf) {
         "/usr/lib/x86_64-linux-gnu/libssl.so.1.1",
     ];
 
+    // Classic + set_fd required; `_ex` / `SSL_free` soft-loaded.
     for name in [
         "enter_ssl_set_fd",
         "enter_ssl_write",
         "exit_ssl_write",
         "enter_ssl_read",
         "exit_ssl_read",
-        "enter_ssl_write_ex",
-        "exit_ssl_write_ex",
-        "enter_ssl_read_ex",
-        "exit_ssl_read_ex",
     ] {
         if let Err(e) = load_uprobe(ebpf, name) {
             warn!("failed to load {name}: {e:#} (continuing; cleartext still active)");
             return;
         }
     }
+    let mut have_ex = true;
+    for name in [
+        "enter_ssl_write_ex",
+        "exit_ssl_write_ex",
+        "enter_ssl_read_ex",
+        "exit_ssl_read_ex",
+    ] {
+        if let Err(e) = load_uprobe(ebpf, name) {
+            warn!("failed to load optional {name}: {e:#}");
+            have_ex = false;
+            break;
+        }
+    }
+    let have_free = match load_uprobe(ebpf, "enter_ssl_free") {
+        Ok(()) => true,
+        Err(e) => {
+            debug!("failed to load optional enter_ssl_free: {e:#}");
+            false
+        }
+    };
 
     let mut attached_any = false;
+    let mut seen_inodes = HashSet::new();
     for path in CANDIDATES {
         if !Path::new(path).exists() {
             continue;
         }
+        // Dedup /lib vs /usr/lib when they are the same inode (avoids double-fire).
+        match std::fs::metadata(path) {
+            Ok(meta) => {
+                let inode_key = (meta.dev(), meta.ino());
+                if !seen_inodes.insert(inode_key) {
+                    debug!("skip duplicate libssl path {path} (same inode)");
+                    continue;
+                }
+            }
+            Err(e) => {
+                debug!("stat {path}: {e}");
+                continue;
+            }
+        }
+
         let required = [
             ("enter_ssl_set_fd", "SSL_set_fd"),
             ("enter_ssl_write", "SSL_write"),
             ("exit_ssl_write", "SSL_write"),
             ("enter_ssl_read", "SSL_read"),
             ("exit_ssl_read", "SSL_read"),
-            ("enter_ssl_write_ex", "SSL_write_ex"),
-            ("exit_ssl_write_ex", "SSL_write_ex"),
-            ("enter_ssl_read_ex", "SSL_read_ex"),
-            ("exit_ssl_read_ex", "SSL_read_ex"),
         ];
         let mut path_ok = true;
         for (prog, sym) in required {
@@ -264,13 +297,39 @@ fn attach_openssl_uprobes(ebpf: &mut aya::Ebpf) {
         if !path_ok {
             continue;
         }
-        // Optional: same program on rfd/wfd (some stacks only call these).
+
+        // Soft: CPython uses `_ex`; older OpenSSL may only have classic.
+        let mut ex_ok = 0usize;
+        if have_ex {
+            let optional_ex = [
+                ("enter_ssl_write_ex", "SSL_write_ex"),
+                ("exit_ssl_write_ex", "SSL_write_ex"),
+                ("enter_ssl_read_ex", "SSL_read_ex"),
+                ("exit_ssl_read_ex", "SSL_read_ex"),
+            ];
+            for (prog, sym) in optional_ex {
+                match attach_uprobe(ebpf, prog, sym, path) {
+                    Ok(()) => ex_ok += 1,
+                    Err(e) => debug!("optional {prog} → {sym} in {path}: {e:#}"),
+                }
+            }
+            if ex_ok == 0 {
+                debug!("no SSL_*_ex symbols in {path}; classic SSL_read/write only");
+            }
+        }
+
         for sym in ["SSL_set_rfd", "SSL_set_wfd"] {
             if let Err(e) = attach_uprobe(ebpf, "enter_ssl_set_fd", sym, path) {
                 debug!("optional {sym} in {path}: {e:#}");
             }
         }
-        info!("attached OpenSSL uprobes to {path}");
+        if have_free {
+            if let Err(e) = attach_uprobe(ebpf, "enter_ssl_free", "SSL_free", path) {
+                debug!("optional SSL_free in {path}: {e:#}");
+            }
+        }
+
+        info!("attached OpenSSL uprobes to {path} (classic + {ex_ok}/4 _ex)");
         attached_any = true;
     }
     if !attached_any {
