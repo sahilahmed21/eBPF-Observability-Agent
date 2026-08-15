@@ -1,9 +1,9 @@
-# Grafana dashboards (Phase 4)
+# Grafana dashboards (Phase 5)
 
-Place JSON exports here for:
+Import [`obsagent.json`](obsagent.json) into Grafana.
 
-- Service map / node graph
-- Per-endpoint latency heatmap
-- Top error-rate endpoints
+Datasource: Prometheus scraping the collector (`otel-collector:8889` from
+`deploy/k8s/otel-collector.yaml`). Metric names may be normalized by the
+collector's Prometheus exporter (underscores / `_bucket` / `_total` suffixes).
 
-Screenshots for the portfolio can live alongside or in docs assets.
+Panels: latency quantiles, request rate by edge, agent drops, edge count.

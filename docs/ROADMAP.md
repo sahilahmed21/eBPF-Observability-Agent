@@ -4,33 +4,33 @@ Use this as the execution checklist. Update status as milestones land.
 
 ## Phase 0 — Foundations (next)
 
-- [ ] Confirm BTF: `/sys/kernel/btf/vmlinux` exists on the primary dev host
-- [ ] Install stable + nightly (`rust-src`), `bpf-linker`
-- [ ] Read [Aya book](https://aya-rs.dev/book/) (concepts before custom code)
-- [ ] Scaffold Aya workspace (`common`, `ebpf`, `agent`, `xtask`)
-- [ ] Load trivial kprobe; `aya-log` output; clean unload
-- [ ] **Milestone 0** complete
+- [x] Confirm BTF: `/sys/kernel/btf/vmlinux` exists on the primary dev host
+- [x] Install stable + nightly (`rust-src`), `bpf-linker`
+- [x] Read [Aya book](https://aya-rs.dev/book/) (concepts before custom code)
+- [x] Scaffold Aya workspace (`common`, `ebpf`, `agent`, `xtask`)
+- [x] Load trivial kprobe; `aya-log` output; clean unload
+- [x] **Milestone 0** complete
 
 ## Phase 1 — Syscall latency MVP
 
-- [ ] Tracepoints: connect enter/exit
-- [ ] Tracepoints: accept4 enter/exit
-- [ ] Pending HashMap + RingBuf events
-- [ ] Socket metadata (CO-RE sock fields preferred)
-- [ ] Tokio RingBuf consumer
-- [ ] Ratatui dashboard (p50/p95/p99, top talkers)
-- [ ] Overhead baseline recorded in `overhead-measurements.md`
-- [ ] **Milestone 1** complete
+- [x] Tracepoints: connect enter/exit
+- [x] Tracepoints: accept4 enter/exit
+- [x] Pending HashMap + RingBuf events
+- [x] Socket metadata (CO-RE sock fields preferred)
+- [x] Tokio RingBuf consumer
+- [x] Ratatui dashboard (p50/p95/p99, top talkers)
+- [x] Overhead baseline recorded in `overhead-measurements.md`
+- [x] **Milestone 1** complete
 
 ## Phase 2 — HTTP awareness
 
-- [ ] Bounded prefix capture on read/write for tracked TCP fds
-- [ ] Per-socket correlation FSM
-- [ ] `httparse` userspace parsing + graceful truncation
-- [ ] Path normalization heuristics
-- [ ] `hdrhistogram` per-endpoint table in CLI
-- [ ] Document pipelining mis-pair failure mode
-- [ ] **Milestone 2** complete
+- [x] Bounded prefix capture on read/write for tracked TCP fds
+- [x] Per-socket correlation FSM
+- [x] `httparse` userspace parsing + graceful truncation
+- [x] Path normalization heuristics
+- [x] `hdrhistogram` per-endpoint table in CLI
+- [x] Document pipelining mis-pair failure mode
+- [x] **Milestone 2** complete
 
 ## Phase 3 — TLS interception (OpenSSL HTTPS)
 
@@ -46,13 +46,25 @@ Plan: [phases/phase-3-implementation-plan.md](phases/phase-3-implementation-plan
 
 ## Phase 4 — Production grade
 
-- [ ] Service map graph in memory
-- [ ] PID → cgroup → container → pod/namespace identity
-- [ ] OTLP traces + metrics
-- [ ] Grafana dashboard
-- [ ] Dockerfile + DaemonSet (capabilities, BTF mounts)
-- [ ] kind/minikube demo with multi-service app
-- [ ] **Milestone 4** complete
+Plan: [phases/phase-4-implementation-plan.md](phases/phase-4-implementation-plan.md).
+
+- [x] Service map graph in memory
+- [x] PID → cgroup → container → pod/namespace identity
+- [x] OTLP metrics (traces optional / deferred)
+- [x] Collector + Prometheus scrape path (Grafana dashboard JSON optional)
+- [x] Dockerfile + DaemonSet (capabilities, BTF mounts)
+- [x] kind/minikube demo with multi-service app
+- [x] **Milestone 4** complete (kind `obsagent` 2026-08-15: DS + demo + OTLP scrape)
+
+## Phase 5 — Production hardening
+
+Plan: [phases/phase-5-implementation-plan.md](phases/phase-5-implementation-plan.md).
+
+- [x] Cumulative OTLP histograms (replace gauge-per-sample)
+- [x] Agent self-metrics + label/peer hygiene
+- [x] Grafana dashboard JSON
+- [x] smoke4 / optional kind e2e gate
+- [x] **Milestone 5** complete (local gates + `KIND_E2E=1` smoke4 + Prometheus scrape 2026-08-15)
 
 ## Stretch
 

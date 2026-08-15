@@ -18,6 +18,8 @@ httparse = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
 ratatui = { workspace = true, default-features = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = [
     "macros",
     "rt",

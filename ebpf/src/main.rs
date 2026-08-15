@@ -13,7 +13,7 @@ use aya_ebpf::{
 use aya_log_ebpf::info;
 use obsagent_common::{
     AF_INET, EVENTS_RINGBUF_BYTES, EventKind, IoDir, PENDING_MAP_ENTRIES, PendingEnter,
-    PendingIo, PendingTls, SOCK_IO_PREFIX_LEN, SockIoEvent, SockLatencyEvent,
+    PendingIo, PendingTls, SOCK_IO_PREFIX_LEN, SockIoEvent, SockLatencyEvent, SockMeta,
 };
 
 // Tracepoint field offsets from this kernel's format files (WSL2 6.6).
@@ -40,10 +40,11 @@ static PENDING_TLS: HashMap<u32, PendingTls> =
 static PENDING_TLS_EX: HashMap<u32, PendingTls> =
     HashMap::<u32, PendingTls>::with_max_entries(PENDING_MAP_ENTRIES, 0);
 
-/// Q4: fds observed via connect/accept (process fd table). Key = (tgid, fd).
+/// Phase 4 Q1: fds observed via connect/accept with peer metadata.
+/// Key = (tgid, fd). Replaces presence-only `SOCK_FDS`.
 #[map]
-static SOCK_FDS: HashMap<u64, u8> =
-    HashMap::<u64, u8>::with_max_entries(PENDING_MAP_ENTRIES, 0);
+static SOCK_META: HashMap<u64, SockMeta> =
+    HashMap::<u64, SockMeta>::with_max_entries(PENDING_MAP_ENTRIES, 0);
 
 /// Phase 3 Q1: SSL* → fd (from SSL_set_fd / rfd / wfd).
 #[map]
@@ -90,20 +91,20 @@ fn sock_fd_key(tgid: u32, fd: u32) -> u64 {
     ((tgid as u64) << 32) | (fd as u64)
 }
 
-fn mark_sock_fd(fd: i64) {
+fn mark_sock_meta(fd: i64, daddr_be: u32, dport_be: u16) {
     if fd < 0 || fd > u32::MAX as i64 {
         return;
     }
     let (tgid, _) = pid_tgid();
     let key = sock_fd_key(tgid, fd as u32);
-    let one: u8 = 1;
-    let _ = SOCK_FDS.insert(&key, &one, 0);
+    let meta = SockMeta::with_peer(daddr_be, dport_be);
+    let _ = SOCK_META.insert(&key, &meta, 0);
 }
 
 fn unmark_sock_fd(fd: u32) {
     let (tgid, _) = pid_tgid();
     let key = sock_fd_key(tgid, fd);
-    let _ = SOCK_FDS.remove(&key);
+    let _ = SOCK_META.remove(&key);
     let _ = TLS_FDS.remove(&key);
     clear_ssl_for_fd_key(key, fd as i32);
 }
@@ -146,7 +147,7 @@ fn clear_ssl_ptr(ssl: u64) {
 fn is_marked_sock_fd(fd: u32) -> bool {
     let (tgid, _) = pid_tgid();
     let key = sock_fd_key(tgid, fd);
-    unsafe { SOCK_FDS.get(&key).is_some() }
+    unsafe { SOCK_META.get(&key).is_some() }
 }
 
 fn is_tls_fd(fd: u32) -> bool {
@@ -320,13 +321,14 @@ pub fn enter_connect(ctx: TracePointContext) -> u32 {
 
 fn try_enter_connect(ctx: &TracePointContext) -> Result<(), i64> {
     let fd: u64 = unsafe { ctx.read_at(ENTER_FD_OFF)? };
-    mark_sock_fd(fd as i64);
 
     let sockaddr: *const SockAddrIn = unsafe { ctx.read_at(ENTER_SOCKADDR_OFF)? };
     let (daddr_be, dport_be) = match read_sockaddr_v4(sockaddr) {
         Ok(v) => v,
         Err(_) => return Ok(()), // non-IPv4: ignore (P1 Q4)
     };
+    // Phase 4 Q1: store peer with the fd mark (was presence-only SOCK_FDS).
+    mark_sock_meta(fd as i64, daddr_be, dport_be);
     let pending = PendingEnter {
         ts_ns: unsafe { bpf_ktime_get_ns() },
         daddr_be,
@@ -388,11 +390,10 @@ fn try_exit_accept4(ctx: &TracePointContext) -> Result<(), i64> {
     let _ = PENDING.remove(&tid);
 
     let ret: i64 = unsafe { ctx.read_at(EXIT_RET_OFF)? };
-    mark_sock_fd(ret);
-
     let now = unsafe { bpf_ktime_get_ns() };
     let latency_ns = now.saturating_sub(pending.ts_ns);
     let (daddr_be, dport_be) = peer_addr(&pending, ret);
+    mark_sock_meta(ret, daddr_be, dport_be);
     emit(EventKind::Accept, ret, latency_ns, now, daddr_be, dport_be);
     Ok(())
 }

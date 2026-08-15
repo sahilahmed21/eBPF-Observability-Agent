@@ -1,11 +1,9 @@
-# Phase 4 — agent configuration (sampling, redaction toggles, OTLP endpoint).
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: ebpf-obs-agent
+  name: ebpf-obs-agent-config
   namespace: observability
 data:
-  # otlp_endpoint: "otel-collector.observability:4317"
-  # ringbuf_drop_log: "true"
-  config.yaml: |
-    # placeholder
+  # Optional agent knobs (env preferred for OTLP).
+  RUST_LOG: warn
+  OBSAGENT_HEADLESS: "1"

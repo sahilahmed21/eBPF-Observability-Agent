@@ -1,5 +1,4 @@
-# Phase 4 — illustrative DaemonSet shape (not yet applied).
-# Replace image, refine capabilities for your cluster kernel.
+# Phase 4 — DaemonSet (prefer capabilities; privileged fallback documented).
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -19,10 +18,20 @@ spec:
       containers:
         - name: agent
           image: ebpf-obs-agent:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OBSAGENT_HEADLESS
+              value: "1"
+            - name: RUST_LOG
+              value: warn
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc:4318
           securityContext:
-            # Prefer explicit caps on 5.8+ kernels when possible:
-            # capabilities.add: ["BPF", "PERFMON", "SYS_PTRACE"]
-            privileged: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["BPF", "PERFMON", "SYS_PTRACE", "SYS_RESOURCE"]
+            # If the cluster kernel rejects distinct caps, set privileged: true instead.
           volumeMounts:
             - name: btf
               mountPath: /sys/kernel/btf
@@ -30,6 +39,16 @@ spec:
             - name: debug
               mountPath: /sys/kernel/debug
               readOnly: true
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
       volumes:
         - name: btf
           hostPath:
@@ -37,3 +56,6 @@ spec:
         - name: debug
           hostPath:
             path: /sys/kernel/debug
+        - name: proc
+          hostPath:
+            path: /proc

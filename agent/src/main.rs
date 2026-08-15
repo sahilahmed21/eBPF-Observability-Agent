@@ -1,8 +1,14 @@
 mod agg;
 mod correlate;
 mod decode;
+mod export;
 mod http;
 mod http_agg;
+mod identity;
+mod k8s_index;
+mod metrics_registry;
+mod peer_cache;
+mod service_map;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -13,13 +19,19 @@ use std::os::unix::fs::MetadataExt;
 
 use agg::Aggregator;
 use anyhow::Context as _;
-use aya::maps::{Array, MapData, RingBuf};
+use aya::maps::{Array, HashMap as AyaHashMap, MapData, RingBuf};
 use aya::programs::uprobe::UProbeScope;
 use aya::programs::{KProbe, TracePoint, UProbe};
-use correlate::Correlator;
+use correlate::{Correlator, Exchange, PeerV4};
 use decode::{DecodedEvent, decode_event};
+use export::ExportHub;
 use http::parse_exchange;
 use http_agg::HttpAggregator;
+use identity::IdentityResolver;
+use k8s_index::{spawn_pod_index_if_configured, PodIndex};
+use obsagent_common::SockMeta;
+use peer_cache::PeerCache;
+use service_map::{format_ip_port, DstId, MapRecord, ServiceMap};
 #[rustfmt::skip]
 use log::{debug, info, warn};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -107,13 +119,23 @@ async fn main() -> anyhow::Result<()> {
     let drops_map = ebpf
         .take_map("DROPS")
         .context("DROPS map missing")?;
+    let sock_meta_map = ebpf
+        .take_map("SOCK_META")
+        .context("SOCK_META map missing")?;
 
     let ring = RingBuf::try_from(events_map)?;
     let drops: Array<MapData, u64> = Array::try_from(drops_map)?;
+    let sock_meta: Arc<Mutex<AyaHashMap<MapData, u64, SockMeta>>> =
+        Arc::new(Mutex::new(AyaHashMap::try_from(sock_meta_map)?));
 
     let tcp_agg = Arc::new(Mutex::new(Aggregator::default()));
     let http_agg = Arc::new(Mutex::new(HttpAggregator::default()));
     let correlator = Arc::new(Mutex::new(Correlator::default()));
+    let identity = Arc::new(Mutex::new(IdentityResolver::default()));
+    let service_map = Arc::new(Mutex::new(ServiceMap::default()));
+    let peer_cache = Arc::new(Mutex::new(PeerCache::default()));
+    let pod_index = spawn_pod_index_if_configured();
+    let export = Arc::new(ExportHub::spawn());
     let rates = Arc::new(Mutex::new(Vec::new()));
     let drop_count = Arc::new(Mutex::new(0u64));
     let sockio_count = Arc::new(Mutex::new(0u64));
@@ -122,6 +144,12 @@ async fn main() -> anyhow::Result<()> {
     let tcp_rb = Arc::clone(&tcp_agg);
     let http_rb = Arc::clone(&http_agg);
     let corr_rb = Arc::clone(&correlator);
+    let id_rb = Arc::clone(&identity);
+    let map_rb = Arc::clone(&service_map);
+    let peers_rb = Arc::clone(&peer_cache);
+    let pods_rb = Arc::clone(&pod_index);
+    let export_rb = Arc::clone(&export);
+    let meta_rb = Arc::clone(&sock_meta);
     let rates_rb = Arc::clone(&rates);
     let drop_rb = Arc::clone(&drop_count);
     let sockio_rb = Arc::clone(&sockio_count);
@@ -151,18 +179,20 @@ async fn main() -> anyhow::Result<()> {
                             DecodedEvent::Io(ev) => {
                                 *lock_mut(&sockio_rb) += 1;
                                 if let Some(ex) = lock_mut(&corr_rb).observe(&ev, now) {
-                                    if let Some(parsed) = parse_exchange(&ex) {
-                                        lock_mut(&http_rb).record(&parsed, now);
-                                    }
+                                    handle_exchange(
+                                        ex, now, &meta_rb, &peers_rb, &id_rb, &pods_rb, &map_rb,
+                                        &http_rb, &export_rb,
+                                    );
                                 }
                             }
                             DecodedEvent::TlsIo(ev) => {
                                 *lock_mut(&tlsio_rb) += 1;
                                 // Client-only: same-host OpenSSL server halves would 2× rates.
                                 if let Some(ex) = lock_mut(&corr_rb).observe_client(&ev, now) {
-                                    if let Some(parsed) = parse_exchange(&ex) {
-                                        lock_mut(&http_rb).record(&parsed, now);
-                                    }
+                                    handle_exchange(
+                                        ex, now, &meta_rb, &peers_rb, &id_rb, &pods_rb, &map_rb,
+                                        &http_rb, &export_rb,
+                                    );
                                 }
                             }
                         }
@@ -181,23 +211,126 @@ async fn main() -> anyhow::Result<()> {
                     events_in_tick = 0;
                     if let Ok(v) = drops.get(&0, 0) {
                         *lock_mut(&drop_rb) = v;
+                        export_rb.set_events_dropped(v);
                     }
+                    let edges = lock_mut(&map_rb).edge_count() as u64;
+                    export_rb.set_edge_count(edges);
                 }
             }
         }
     });
 
-    info!("Phase 3 agent running (TCP + HTTP + TLS). q quit, t toggle view.");
+    info!("Phase 5 agent running (hardened export + service map). q quit, t toggle view.");
     let headless = std::env::var_os("OBSAGENT_HEADLESS").is_some()
         || !std::io::IsTerminal::is_terminal(&std::io::stdout());
     if headless {
-        run_headless(tcp_agg, http_agg, drop_count, sockio_count, tlsio_count).await?;
+        run_headless(
+            tcp_agg,
+            http_agg,
+            service_map,
+            drop_count,
+            sockio_count,
+            tlsio_count,
+            export,
+        )
+        .await?;
     } else {
         run_tui(tcp_agg, http_agg, rates, drop_count).await?;
     }
 
     drop(ebpf);
     Ok(())
+}
+
+fn handle_exchange(
+    mut ex: Exchange,
+    now: Instant,
+    sock_meta: &Mutex<AyaHashMap<MapData, u64, SockMeta>>,
+    peer_cache: &Mutex<PeerCache>,
+    identity: &Mutex<IdentityResolver>,
+    pods: &Mutex<PodIndex>,
+    service_map: &Mutex<ServiceMap>,
+    http_agg: &Mutex<HttpAggregator>,
+    export: &ExportHub,
+) {
+    if ex.peer.is_none() {
+        ex.peer = lookup_peer(sock_meta, peer_cache, ex.tgid, ex.fd, now);
+    }
+    let Some(parsed) = parse_exchange(&ex) else {
+        return;
+    };
+    lock_mut(http_agg).record(&parsed, now);
+
+    let mut src = lock_mut(identity).resolve(ex.tgid, now);
+    if let Some(uid) = src.pod_uid.as_deref() {
+        if let Ok(idx) = pods.lock() {
+            if let Some((ns, name)) = idx.lookup_uid(uid) {
+                src.label = format!("{ns}/{name}");
+            }
+        }
+    }
+    let dst = resolve_dst(ex.peer, pods, &src);
+    let rec = MapRecord {
+        src: src.clone(),
+        dst: dst.clone(),
+        endpoint: parsed.endpoint.clone(),
+        latency_ns: parsed.latency_ns,
+        status: parsed.status,
+    };
+    lock_mut(service_map).record(&rec, now);
+    export.record_exchange(
+        &src.label,
+        &dst,
+        &parsed.endpoint.method,
+        &parsed.endpoint.path,
+        parsed.latency_ns,
+        parsed.status,
+    );
+}
+
+fn lookup_peer(
+    sock_meta: &Mutex<AyaHashMap<MapData, u64, SockMeta>>,
+    peer_cache: &Mutex<PeerCache>,
+    tgid: u32,
+    fd: i32,
+    now: Instant,
+) -> Option<PeerV4> {
+    if fd < 0 {
+        return None;
+    }
+    if let Some(p) = lock_mut(peer_cache).get(tgid, fd, now) {
+        return Some(p);
+    }
+    let key = ((tgid as u64) << 32) | (fd as u32 as u64);
+    let map = lock_mut(sock_meta);
+    let meta = map.get(&key, 0).ok()?;
+    if !meta.has_addr() {
+        return None;
+    }
+    let peer = PeerV4 {
+        daddr_be: meta.daddr_be,
+        dport_be: meta.dport_be,
+    };
+    drop(map);
+    lock_mut(peer_cache).insert(tgid, fd, peer, now);
+    Some(peer)
+}
+
+fn resolve_dst(peer: Option<PeerV4>, pods: &Mutex<PodIndex>, _src: &identity::NodeId) -> DstId {
+    let Some(p) = peer else {
+        return DstId::Unknown;
+    };
+    if let Ok(idx) = pods.lock() {
+        if let Some((ns, name)) = idx.lookup_ip(p.daddr_be) {
+            return DstId::Pod {
+                namespace: ns,
+                name,
+            };
+        }
+    }
+    DstId::IpPort {
+        addr: format_ip_port(p.daddr_be, p.dport_be),
+    }
 }
 
 fn attach_tp(
@@ -364,9 +497,11 @@ fn lock_mut<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 async fn run_headless(
     tcp_agg: Arc<Mutex<Aggregator>>,
     http_agg: Arc<Mutex<HttpAggregator>>,
+    service_map: Arc<Mutex<ServiceMap>>,
     drop_count: Arc<Mutex<u64>>,
     sockio_count: Arc<Mutex<u64>>,
     tlsio_count: Arc<Mutex<u64>>,
+    export: Arc<ExportHub>,
 ) -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -377,13 +512,18 @@ async fn run_headless(
                 let now = Instant::now();
                 let tcp_rows = lock_mut(&tcp_agg).rows(now);
                 let http_rows = lock_mut(&http_agg).rows(now);
+                let map_rows = lock_mut(&service_map).rows(now);
                 let tcp_total: u64 = tcp_rows.iter().map(|(_, r)| r.count).sum();
                 let http_total: u64 = http_rows.iter().map(|(_, r)| r.count).sum();
                 let drops = *lock_mut(&drop_count);
                 let sockio = *lock_mut(&sockio_count);
                 let tlsio = *lock_mut(&tlsio_count);
+                let edges = lock_mut(&service_map).edge_count();
+                let export_drop = export.dropped.load(std::sync::atomic::Ordering::Relaxed);
+                let export_ok = export.exported.load(std::sync::atomic::Ordering::Relaxed);
+                let otlp = if export.enabled() { "on" } else { "off" };
                 println!(
-                    "events_60s={tcp_total} tcp_60s={tcp_total} http_60s={http_total} sockio={sockio} tlsio={tlsio} drops={drops}"
+                    "events_60s={tcp_total} tcp_60s={tcp_total} http_60s={http_total} sockio={sockio} tlsio={tlsio} drops={drops} edges={edges} otlp={otlp} otlp_ok={export_ok} otlp_drop={export_drop}"
                 );
                 for (k, r) in http_rows.iter().take(8) {
                     println!(
@@ -393,6 +533,17 @@ async fn run_headless(
                         r.rate_per_s,
                         fmt_ns(r.p50_ns),
                         r.pct_4xx,
+                        r.pct_5xx
+                    );
+                }
+                for (k, r) in map_rows.iter().take(8) {
+                    println!(
+                        "  [edge] {} -> {} count={} rate={:.2}/s p99={} 5xx={:.0}%",
+                        k.src,
+                        k.dst.label(),
+                        r.count,
+                        r.rate_per_s,
+                        fmt_ns(r.p99_ns),
                         r.pct_5xx
                     );
                 }

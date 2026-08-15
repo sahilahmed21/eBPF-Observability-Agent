@@ -125,6 +125,38 @@ pub type TlsIoEvent = SockIoEvent;
 
 pub const TLS_IO_EVENT_SIZE: usize = SOCK_IO_EVENT_SIZE;
 
+/// Per-fd peer metadata (Phase 4 Q1). BPF map value for `SOCK_META`.
+///
+/// Replaces presence-only `SOCK_FDS` (`u8`). Key remains `(tgid, fd)` as `u64`.
+/// `flags` bit0 = peer address is valid.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SockMeta {
+    pub daddr_be: u32,
+    pub dport_be: u16,
+    pub flags: u8,
+    pub _pad: u8,
+}
+
+impl SockMeta {
+    pub const FLAG_HAS_ADDR: u8 = 1;
+
+    pub fn with_peer(daddr_be: u32, dport_be: u16) -> Self {
+        Self {
+            daddr_be,
+            dport_be,
+            flags: Self::FLAG_HAS_ADDR,
+            _pad: 0,
+        }
+    }
+
+    pub fn has_addr(self) -> bool {
+        self.flags & Self::FLAG_HAS_ADDR != 0
+    }
+}
+
+pub const SOCK_META_SIZE: usize = core::mem::size_of::<SockMeta>();
+
 /// Enter-side pending record (HashMap value). Not sent on the RingBuf.
 ///
 /// Connect: `daddr_be`/`dport_be` filled on enter (`has_addr=1`).
@@ -170,6 +202,9 @@ unsafe impl aya::Pod for SockLatencyEvent {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for SockIoEvent {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for SockMeta {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for PendingEnter {}
@@ -280,5 +315,17 @@ mod tests {
     fn pending_tls_layout() {
         assert_eq!(core::mem::size_of::<PendingTls>(), 32);
         assert_eq!(core::mem::align_of::<PendingTls>(), 8);
+    }
+
+    // --- Phase 4 SockMeta ---
+
+    #[test]
+    fn sock_meta_layout() {
+        assert_eq!(SOCK_META_SIZE, 8);
+        assert_eq!(core::mem::align_of::<SockMeta>(), 4);
+        let m = SockMeta::with_peer(0x0100007f, 0x5000);
+        assert!(m.has_addr());
+        assert_eq!(m.daddr_be, 0x0100007f);
+        assert_eq!(m.dport_be, 0x5000);
     }
 }

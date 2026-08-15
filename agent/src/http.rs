@@ -138,6 +138,7 @@ mod tests {
             resp_prefix: b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(),
             t_start_ns: 0,
             t_end_ns: 1_000_000,
+            peer: None,
         };
         let p = parse_exchange(&ex).expect("parsed");
         assert_eq!(p.endpoint.label(), "GET /users/:id");
@@ -154,6 +155,7 @@ mod tests {
             resp_prefix: b"HTTP/1.1 404 Not Found\r\n".to_vec(),
             t_start_ns: 0,
             t_end_ns: 10,
+            peer: None,
         };
         let p = parse_exchange(&ex).expect("partial");
         assert_eq!(p.endpoint.method, "GET");

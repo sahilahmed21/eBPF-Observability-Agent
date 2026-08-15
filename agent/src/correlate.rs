@@ -11,6 +11,8 @@
 //! - Server responses via `sendmsg`/`writev` are not probed (Phase 2 attach set).
 //! - TLS (`observe_client`): only write→read pairing so same-host OpenSSL
 //!   client+server does not double-count HTTP rates.
+//! - Peer address is joined from `SOCK_META` after emit (Phase 4 Q1); correlator
+//!   itself does not look up maps.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -35,6 +37,13 @@ impl SockKey {
     }
 }
 
+/// IPv4 peer from `SOCK_META` (network byte order fields).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PeerV4 {
+    pub daddr_be: u32,
+    pub dport_be: u16,
+}
+
 #[derive(Clone, Debug)]
 struct Pending {
     dir: IoDir,
@@ -52,6 +61,8 @@ pub struct Exchange {
     pub resp_prefix: Vec<u8>,
     pub t_start_ns: u64,
     pub t_end_ns: u64,
+    /// Filled by userspace from `SOCK_META` after correlation (Phase 4 Q1).
+    pub peer: Option<PeerV4>,
 }
 
 impl Exchange {
@@ -143,6 +154,7 @@ impl Correlator {
                     resp_prefix: prefix,
                     t_start_ns: pending.ts_ns,
                     t_end_ns: ev.ts_ns,
+                    peer: None,
                 })
             }
         }

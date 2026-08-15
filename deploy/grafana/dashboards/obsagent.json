@@ -1,0 +1,70 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "HTTP client latency (p50/p95 approx via histogram)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_client_duration_bucket[1m])) by (le, http_route))",
+          "legendFormat": "p50 {{http_route}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_client_duration_bucket[1m])) by (le, http_route))",
+          "legendFormat": "p95 {{http_route}}"
+        }
+      ]
+    },
+    {
+      "title": "HTTP request rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_client_requests_total[1m])) by (src, dst)",
+          "legendFormat": "{{src}} → {{dst}}"
+        }
+      ]
+    },
+    {
+      "title": "Agent drops",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "obsagent_events_dropped_total",
+          "legendFormat": "ringbuf drops"
+        },
+        {
+          "expr": "obsagent_otlp_dropped_total",
+          "legendFormat": "otlp drops"
+        }
+      ]
+    },
+    {
+      "title": "Service map edge count",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "obsagent_service_map_edges",
+          "legendFormat": "edges"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["obsagent", "ebpf", "phase5"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "title": "eBPF Observability Agent",
+  "uid": "obsagent-phase5",
+  "version": 1
+}
