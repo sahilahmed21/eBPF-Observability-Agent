@@ -24,5 +24,8 @@ Cargo.lock
 /tmp-overhead/
 perf.data*
 
+# Interview prep — local only (not published)
+docs/interview/
+
 # Kind / kube local
 kubeconfig-local

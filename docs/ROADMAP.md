@@ -143,7 +143,7 @@ Checklist: [phases/phase-12.md](phases/phase-12.md) · Plan: [phases/phase-12-im
 
 ## Interview prep checklist
 
-Pack: [interview/README.md](interview/README.md) — [CONCEPTS_GRILL.md](interview/CONCEPTS_GRILL.md) · [RUST_GRILL.md](interview/RUST_GRILL.md) · [RESUME_AND_STORY.md](interview/RESUME_AND_STORY.md) · [SCRIPT_AND_QNA.md](interview/SCRIPT_AND_QNA.md)
+Interview pack lives **local-only** under `docs/interview/` (gitignored; not on GitHub).
 
 - [ ] Whiteboard FSM for fd-keyed correlation
 - [x] 2–3 real verifier rejection stories in the log (`docs/verifier-rejection-log.md`)
