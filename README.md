@@ -23,6 +23,8 @@ Validated on **WSL2 + k3s** (claim lock **10/10**, 2026-08-25):
 
 > Overhead is **measured**, not aspirational. This project does **not** claim “under 2% CPU.”
 
+**Project status:** [Goals achieved — why this is complete](docs/GOALS-AND-SUCCESS.md) (claim lock **10/10**).
+
 ![Grafana dashboard](docs/handoff/artifacts/grafana-vision95.png)
 
 ---
