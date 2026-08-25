@@ -1,7 +1,10 @@
 //! Injectable-latency HTTP server for Phase 2 correctness (Q13).
+//! Phase 12: `/slow` burns CPU in a named symbol for profile join gates.
+//! (thread::sleep deschedules the task; CPU-clock sampling never hits it.)
 
+use std::hint::black_box;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query};
 use axum::routing::get;
@@ -18,6 +21,18 @@ fn default_delay() -> u64 {
     50
 }
 
+/// Named on-CPU burn target for Phase 12 stack join (must not be inlined).
+/// Busy-wait so perf CPU-clock samples land on this tgid during the span window.
+#[inline(never)]
+fn slow_handler_sleep(delay_ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(delay_ms);
+    let mut x = 0u64;
+    while Instant::now() < deadline {
+        x = black_box(x.wrapping_add(1));
+    }
+    black_box(x);
+}
+
 #[tokio::main]
 async fn main() {
     let port: u16 = std::env::var("PORT")
@@ -29,7 +44,8 @@ async fn main() {
         .route(
             "/slow",
             get(|Query(q): Query<SlowQuery>| async move {
-                tokio::time::sleep(Duration::from_millis(q.delay_ms)).await;
+                let ms = q.delay_ms;
+                let _ = tokio::task::spawn_blocking(move || slow_handler_sleep(ms)).await;
                 StatusCode::OK
             }),
         )

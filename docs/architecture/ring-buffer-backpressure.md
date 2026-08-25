@@ -16,7 +16,16 @@ Interview: *RingBuf fills faster than userspace can drain — options? What did 
 
 Use (b) only as a **small** sized buffer tuned for normal load, not as the primary strategy.
 
-Optional later: kernel-side **sampling rate** map (e.g. 1-in-N) when drop rate exceeds a threshold — still under (a)’s philosophy.
+**Phase 11 (locked):** still (a). Add in-kernel **sticky 1/N of connections**, not per-event modulo.
+
+- `SAMPLE_N` Array: auto `{1,2,4,8,16}` (double when `DROPS` increased in the last 1 s; halve after 30 s quiet) or pin `OBSAGENT_SAMPLE_N`.
+- Draw `KEEP_IO` once per `(tgid,fd)` at `SOCK_META` insert (connect/accept). I/O paths must not create a new `SOCK_META` key. All `SockIo` / `TlsIo` / `SockIoTimes` on that fd follow the bit. Skipping frames independently would unpair HTTP and desync HPACK.
+- Sample skip does **not** increment `DROPS`. `DROPS` remains reserve-fail only.
+- Deny-list: `DENIED_TGID` skips probe work for the agent tgid + deny-list comms **before** prefix copy. Allow-only (`OBSAGENT_COMM_ALLOW`): `ALLOW_ONLY` + `ALLOWED_TGID` (default deny). Userspace `CommFilter` still runs.
+- `/proc` sweep is a separate task (not on the RingBuf drain tick). Numeric `/proc` names that are tids (status `Tgid:` ≠ pid) are not map keys.
+- `n ≤ 1` keeps all I/O. Never `% 0`.
+
+Export `obsagent.sample_n` (gauge) next to `obsagent.events_dropped`.
 
 ## Tradeoff to say in interviews
 

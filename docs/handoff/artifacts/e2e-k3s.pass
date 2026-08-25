@@ -1,0 +1,5 @@
+HEAD=da6a862bcd428ad1d2bb08e9d657d0fb52d5384e
+DATE_UTC=2026-08-24T16:24:44Z
+e2e-k3s PASS
+NOTE=image built from working tree incl. cgroup-id identity (SockIo ABI 296); WSL2 Ubuntu + k3s v1.36.3+k3s1 containerd; kernel 6.6.114.1-microsoft-standard-WSL2; P10-Q2 PASS frontend tgid=7936; named edge src=demo/frontend… dst=demo/api
+LOG=docs/handoff/artifacts/logs/e2e-k3s.log

@@ -47,6 +47,7 @@ struct CacheEntry {
 pub struct IdentityResolver {
     proc_root: PathBuf,
     cache: HashMap<u32, CacheEntry>,
+    comm_cache: HashMap<u32, (String, Instant)>,
 }
 
 impl Default for IdentityResolver {
@@ -54,13 +55,27 @@ impl Default for IdentityResolver {
         let root = std::env::var_os("OBSAGENT_PROC_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                if Path::new("/host/proc").is_dir() {
-                    PathBuf::from("/host/proc")
-                } else {
-                    PathBuf::from("/proc")
-                }
+                choose_proc_root(
+                    Path::new("/host/proc"),
+                    std::process::id(),
+                    Path::new("/proc"),
+                )
             });
         Self::new(root)
+    }
+}
+
+/// Use `/host/proc` only when this process is visible there (hostPID DaemonSet).
+/// An empty leftover `/host/proc` on a laptop must not hide `/proc/<pid>/comm`.
+fn choose_proc_root(host_proc: &Path, self_pid: u32, fallback: &Path) -> PathBuf {
+    if host_proc
+        .join(self_pid.to_string())
+        .join("comm")
+        .is_file()
+    {
+        host_proc.to_path_buf()
+    } else {
+        fallback.to_path_buf()
     }
 }
 
@@ -69,7 +84,13 @@ impl IdentityResolver {
         Self {
             proc_root: proc_root.into(),
             cache: HashMap::new(),
+            comm_cache: HashMap::new(),
         }
+    }
+
+    /// `/proc` (or `/host/proc`) used for comm and cgroup reads.
+    pub fn proc_root(&self) -> &Path {
+        &self.proc_root
     }
 
     pub fn resolve(&mut self, tgid: u32, now: Instant) -> NodeId {
@@ -93,6 +114,38 @@ impl IdentityResolver {
             },
         );
         id
+    }
+
+    /// `/proc/<tgid>/comm` only. Does not parse cgroup or fill the identity cache.
+    pub fn comm(&mut self, tgid: u32, now: Instant) -> String {
+        if let Some((c, at)) = self.comm_cache.get(&tgid) {
+            if now.duration_since(*at) <= CACHE_TTL {
+                return c.clone();
+            }
+        }
+        let dir = self.proc_root.join(tgid.to_string());
+        let mut c = read_comm(&dir.join("comm"));
+        if c.is_empty() {
+            c = read_cmdline_basename(&dir.join("cmdline"));
+        }
+        if self.comm_cache.len() >= CACHE_CAP {
+            self.comm_cache
+                .retain(|_, (_, at)| now.duration_since(*at) <= CACHE_TTL);
+        }
+        if self.comm_cache.len() >= CACHE_CAP {
+            self.comm_cache.clear();
+        }
+        self.comm_cache.insert(tgid, (c.clone(), now));
+        c
+    }
+
+    /// Comm for the process, trying thread id if tgid's `/proc` entry is missing.
+    pub fn comm_pair(&mut self, tgid: u32, pid: u32, now: Instant) -> String {
+        let c = self.comm(tgid, now);
+        if !c.is_empty() || pid == 0 || pid == tgid {
+            return c;
+        }
+        self.comm(pid, now)
     }
 
     fn resolve_uncached(&self, tgid: u32) -> NodeId {
@@ -154,18 +207,25 @@ pub fn parse_cgroup(text: &str) -> CgroupIds {
     out
 }
 
-fn extract_pod_uid(path: &str) -> Option<String> {
-    // kubepods-burstable-pod<UID>.slice  or  pod<UID>
+/// Parse a pod UID out of a cgroup path (slice or cgroupfs). `pub(crate)` for
+/// [`crate::cgroup_index`] inode walks.
+pub(crate) fn extract_pod_uid(path: &str) -> Option<String> {
+    // systemd slice: kubepods-{qos}-pod<UID>.slice
+    // cgroupfs (k3s): .../pod<UID>/...
+    const SLICE_PREFIXES: &[&str] = &[
+        "kubepods-guaranteed-pod",
+        "kubepods-burstable-pod",
+        "kubepods-besteffort-pod",
+        "kubepods-pod",
+    ];
     for part in path.split('/') {
-        let p = part.strip_prefix("kubepods-burstable-pod").or_else(|| {
-            part.strip_prefix("kubepods-besteffort-pod")
-                .or_else(|| part.strip_prefix("kubepods-pod"))
-        });
-        if let Some(rest) = p {
-            let uid = rest.strip_suffix(".slice").unwrap_or(rest);
-            let uid = uid.replace('_', "-");
-            if looks_like_uid(&uid) {
-                return Some(uid);
+        for prefix in SLICE_PREFIXES {
+            if let Some(rest) = part.strip_prefix(prefix) {
+                let uid = rest.strip_suffix(".slice").unwrap_or(rest);
+                let uid = uid.replace('_', "-");
+                if looks_like_uid(&uid) {
+                    return Some(uid);
+                }
             }
         }
         if let Some(rest) = part.strip_prefix("pod") {
@@ -223,7 +283,10 @@ fn short_cid(cid: &str) -> &str {
 
 fn read_comm(path: &Path) -> String {
     fs::read_to_string(path)
-        .map(|s| s.trim().to_string())
+        .map(|s| {
+            s.trim_matches(|c: char| c.is_whitespace() || c == '\0')
+                .to_string()
+        })
         .unwrap_or_default()
 }
 
@@ -248,6 +311,26 @@ fn read_cmdline_basename(path: &Path) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn parses_guaranteed_slice() {
+        let text = "0::/kubepods.slice/kubepods-guaranteed.slice/kubepods-guaranteed-podaaaaaaaa_bbbb_cccc_dddd_eeeeeeeeeeee.slice/cri-containerd-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff.scope\n";
+        let ids = parse_cgroup(text);
+        assert_eq!(
+            ids.pod_uid.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+    }
+
+    #[test]
+    fn parses_k3s_cgroupfs_pod_uid() {
+        let text = "0::/kubepods/burstable/podaaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/cri-containerd-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n";
+        let ids = parse_cgroup(text);
+        assert_eq!(
+            ids.pod_uid.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+    }
 
     #[test]
     fn parses_cri_containerd_cgroup_v2() {
@@ -278,6 +361,48 @@ mod tests {
     #[test]
     fn empty_cgroup_is_empty_ids() {
         assert_eq!(parse_cgroup(""), CgroupIds::default());
+    }
+
+    #[test]
+    fn host_proc_ignored_unless_self_comm_exists() {
+        let missing = std::env::temp_dir().join(format!(
+            "obsagent-host-missing-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&missing);
+        fs::create_dir_all(&missing).unwrap();
+        let fb = Path::new("/proc");
+        assert_eq!(choose_proc_root(&missing, 1, fb), fb);
+        let present = missing.join("1");
+        fs::create_dir_all(&present).unwrap();
+        fs::write(present.join("comm"), "obsagent\n").unwrap();
+        assert_eq!(choose_proc_root(&missing, 1, fb), missing);
+        let _ = fs::remove_dir_all(&missing);
+    }
+
+    #[test]
+    fn comm_reads_only_comm_file() {
+        let root = std::env::temp_dir().join(format!("obsagent-comm-{}", std::process::id()));
+        let p = root.join("9");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&p).unwrap();
+        fs::write(p.join("comm"), "nginx\n").unwrap();
+        let mut r = IdentityResolver::new(&root);
+        assert_eq!(r.comm(9, Instant::now()), "nginx");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn comm_falls_back_to_cmdline() {
+        let root = std::env::temp_dir().join(format!("obsagent-comm-cmd-{}", std::process::id()));
+        let p = root.join("3");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&p).unwrap();
+        fs::write(p.join("comm"), "\0\n").unwrap();
+        fs::write(p.join("cmdline"), b"/tmp/obsotlpsink9\0").unwrap();
+        let mut r = IdentityResolver::new(&root);
+        assert_eq!(r.comm(3, Instant::now()), "obsotlpsink9");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

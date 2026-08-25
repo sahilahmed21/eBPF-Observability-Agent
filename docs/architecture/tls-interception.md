@@ -40,7 +40,8 @@ SSL_set_fd → SSL*→fd → SSL_read/write → TlsIo → existing (tgid,fd) cor
 **TLS-only latency** for Milestone 3. Dual-plane “TLS content + syscall wire timing” is explicitly
 out of scope (would become a general TLS/network correlation engine).
 
-Skip Phase 2 sock I/O capture on fds already marked via `SSL_set_fd` (avoid ciphertext work).
+Skip **prefix copy** on fds marked via `SSL_set_fd` (ciphertext is useless). Phase 8 still emits
+timing-only `SockIoTimes` on those fds.
 
 ## Security implications
 

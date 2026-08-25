@@ -1,26 +1,28 @@
 # Zero-Instrumentation eBPF Observability Agent
 
-Reconstructs per-service HTTP/gRPC latency and a live service map from kernel syscalls and TLS uprobes — **zero app code changes**, target **&lt;2% CPU overhead**.
+Rust + Aya (eBPF) agent that reconstructs **HTTP/1.1**, **HTTP/2/gRPC**, and OpenSSL HTTPS latency from syscalls/uprobes with **zero app SDK**, builds a **live named service map** on a real node, and exports OTLP metrics/traces. Optional CPU stack join on slow spans (`OBSAGENT_PROFILE=1`).
 
-Built in **Rust + Aya (eBPF)**. Deployable as a Kubernetes DaemonSet. Exports OpenTelemetry-compatible traces/metrics.
+**Claim lock:** [docs/handoff/SESSION-VISION-95.md](docs/handoff/SESSION-VISION-95.md) is **10/10 PASS** (2026-08-25). Measured pin-load overhead is **~87% of one core** — do **not** claim `&lt;2%` CPU.
 
 ---
 
 ## The problem
 
-Every APM vendor sells “add our SDK to every service.” eBPF flips that: attach to the kernel, watch syscalls and network I/O, reconstruct application-level traces (HTTP latency, gRPC call graphs, TLS handshake timing) with no per-language SDK.
+Every APM vendor sells “add our SDK to every service.” eBPF flips that: attach to the kernel, watch syscalls and network I/O, reconstruct application-level traces with no per-language SDK.
 
 Hard parts:
 
 1. Programming inside the kernel under a strict **verifier** (no unbounded loops, 512-byte stack, no arbitrary memory access).
-2. Reconstructing app semantics (HTTP req/res pairing, gRPC framing) from raw syscall/packet bytes.
+2. Reconstructing app semantics (HTTP req/res pairing, framing) from raw syscall bytes.
 3. **TLS** — interesting bytes are encrypted before the wire; intercept via **uprobes** on the SSL library, not the network.
 
 ---
 
-## Resume signal
+## Resume signal (claim-locked)
 
-> Built a zero-instrumentation observability agent in Rust using eBPF (Aya) that reconstructs per-service HTTP/gRPC latency and a live service map purely from kernel-level syscall and TLS uprobe data, with under 2% CPU overhead.
+> Built a zero-instrumentation observability agent in Rust + Aya (eBPF) that reconstructs per-service HTTP/gRPC latency and a live named service map on a real k3s node, exports OTLP metrics/traces, joins CPU stacks to slow spans, and measures **~87% of one core** under the Vision-95 pin load (HTTP 500/s + gRPC ~200/s) — not under 2%.
+
+Evidence table: [`docs/handoff/SESSION-VISION-95.md`](docs/handoff/SESSION-VISION-95.md). Overhead detail: [`docs/overhead.md`](docs/overhead.md).
 
 ---
 
@@ -61,7 +63,7 @@ Full design: [`docs/architecture/`](docs/architecture/).
 
 **Start here for a full tour (flows, files, mermaid):** [`docs/architecture/PROJECT-DEEP-DIVE.md`](docs/architecture/PROJECT-DEEP-DIVE.md).
 
-**Correlation key (no request ID):** `(pid, fd, 4-tuple)` + per-socket state machine. Phase 2 uses sock I/O prefixes; Phase 3 feeds OpenSSL plaintext (`TlsIo`) into the **same** SM after `SSL_set_fd`→fd mapping (TLS-only latency in M3 — not dual-plane wire timing). See [correlation.md](docs/architecture/correlation.md).
+**Correlation key (no request ID):** `(pid, fd, 4-tuple)` + per-socket state machine. Phase 2 uses sock I/O prefixes; Phase 3 feeds OpenSSL plaintext (`TlsIo`) into the **same** SM after `SSL_set_fd`→fd mapping. Phase 8 adds wire timing (`SockIoTimes`) joined to TLS content; handshake via `SSL_do_handshake`. See [correlation.md](docs/architecture/correlation.md).
 
 **Backpressure default:** sample/drop in-kernel with a **drop-counter metric** (option a). Bigger buffers only delay the problem. See [ring-buffer-backpressure.md](docs/architecture/ring-buffer-backpressure.md).
 
@@ -97,16 +99,22 @@ Cargo workspace lands in **Phase 0** via `aya-template`. Folders above are the t
 
 | Phase | Goal | Milestone |
 |---|---|---|
-| **0** Setup | Toolchain + BTF + hello kprobe | Load/unload Aya kprobe, `aya-log` works |
-| **1** MVP | `connect`/`accept4` latency + CLI | Live table of endpoints, overhead baseline |
-| **2** HTTP | Uprobe/kprobe byte capture + HTTP/1.1 | Per-endpoint p50/p95/p99 on local server |
-| **3** TLS | OpenSSL `SSL_set_fd` + `SSL_read`/`SSL_write` → `TlsIo` | Same HTTP metrics over HTTPS (TLS-only latency); soft-fail without libssl |
-| **4** Prod | Service map, OTLP, Grafana, DaemonSet | `kubectl apply` → live map on kind |
-| **S** Stretch | HTTP/2+gRPC frames; CPU profile merge | After Phase 4 only |
+| **0** Setup | Toolchain + BTF + hello kprobe | Load/unload Aya kprobe |
+| **1** MVP | `connect`/`accept4` latency + CLI | Live table, overhead baseline |
+| **2** HTTP | HTTP/1.1 from sock I/O | Per-endpoint p50 on local server |
+| **3** TLS | OpenSSL uprobes | HTTPS content latency (M3) |
+| **4–5** Prod demo | Service map, OTLP metrics, kind DS | kind scrape; identity **not** proven |
+| **6** Capture | `writev`/`sendmsg`, reassembly, deny-list, IPv6 | `correctness6` |
+| **7** gRPC | HTTP/2 frames + `:path` | `correctness7-grpc` + h2-tls |
+| **8** Dual-plane | SockIoTimes + handshake | `correctness8-dual` |
+| **9** Traces | OTLP spans + Grafana | collector `/v1/traces` 2xx |
+| **10** Map | Real-node named src/dst | k3s e2e |
+| **11** Overhead | `perf stat` + sampling | &lt;2% or honest number |
+| **12** Profiles | Stacks on slow spans | **Claim lock** |
 
-Detailed checklists: [`docs/phases/`](docs/phases/).
+Phases 0–5 are the demo. **95% of the original brief:** [`docs/phases/VISION-95.md`](docs/phases/VISION-95.md). **Implement from:** [`docs/phases/README.md`](docs/phases/README.md) · [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-Suggested pace (solo, part-time): ~13 weeks to Phase 4; stretch +2–3 weeks. Realistic calendar: 4–5 months.
+Suggested pace: Phases 6–12 ~8–12 focused weeks (see VISION-95 calendar). Do not claim gRPC or &lt;2% until Milestone 12.
 
 ---
 

@@ -22,7 +22,7 @@ Concrete behavior:
 
 1. On `bpf_ringbuf_reserve` failure → `atomic` increment `events_dropped`.
 2. Expose `events_dropped` (and optionally `events_submitted`) via a BPF map read on a timer or CLI status line.
-3. Optionally enable **probabilistic sampling** of high-volume `SockIoPrefix` events when drop rate exceeds a threshold.
+3. **Sticky 1/N of connections** (`KEEP_IO` on `SOCK_META`) when drops rise or `OBSAGENT_SAMPLE_N` is set. Not per-event `% N` (that breaks HTTP/2 HPACK).
 4. Size the RingBuf generously for the demo load, but treat size as **not** the correctness strategy.
 
 ## Interview one-liner

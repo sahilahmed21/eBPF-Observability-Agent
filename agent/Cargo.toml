@@ -19,7 +19,9 @@ libc = { workspace = true }
 log = { workspace = true }
 ratatui = { workspace = true, default-features = true }
 reqwest = { workspace = true }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { workspace = true }
+blazesym = "0.2"
 tokio = { workspace = true, features = [
     "macros",
     "rt",

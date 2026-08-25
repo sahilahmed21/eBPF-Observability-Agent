@@ -1,14 +1,13 @@
-//! Per-socket HTTP correlation state machine (Phase 2).
+//! Per-socket HTTP correlation state machine (Phase 2 + Phase 6 reassembly).
 //!
 //! See `docs/architecture/correlation.md`. Key = `(tgid, fd)` (process fd table).
 //! Latency (Q8) = response-half exit `ts_ns` − request-half exit `ts_ns`.
 //! Stale states evicted after [`TIMEOUT`] (Q11 = 60s).
 //!
 //! # Limits (documented, not solved)
-//! - No TCP reassembly: only the first HTTP-looking chunk per half is paired.
-//! - Partial `recvfrom` slices that do not start with a method/`HTTP/` are dropped
-//!   in-kernel; mid-stream chunks never join an exchange.
-//! - Server responses via `sendmsg`/`writev` are not probed (Phase 2 attach set).
+//! - Split writes are joined by [`crate::reassemble`] before this SM sees them.
+//! - First iovec only (256 B); HTTP sitting only in iov[1+] is still invisible.
+//! - `sendmsg`/`writev` are probed (Phase 6).
 //! - TLS (`observe_client`): only write→read pairing so same-host OpenSSL
 //!   client+server does not double-count HTTP rates.
 //! - Peer address is joined from `SOCK_META` after emit (Phase 4 Q1); correlator
@@ -17,7 +16,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use obsagent_common::{IoDir, SockIoEvent};
+use obsagent_common::{AF_INET, AF_INET6, IoDir, SockIoEvent, SockMeta};
 
 /// Q11: align with rolling agg window.
 pub const TIMEOUT: Duration = Duration::from_secs(60);
@@ -37,11 +36,51 @@ impl SockKey {
     }
 }
 
-/// IPv4 peer from `SOCK_META` (network byte order fields).
+/// Peer from `SOCK_META` (network-order port; v4/v6 address bytes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PeerV4 {
-    pub daddr_be: u32,
+pub struct PeerAddr {
+    pub family: u8,
     pub dport_be: u16,
+    pub daddr: [u8; 16],
+}
+
+impl PeerAddr {
+    pub fn from_v4(daddr_be: u32, dport_be: u16) -> Self {
+        Self::from_meta_unchecked(SockMeta::with_peer_v4(daddr_be, dport_be))
+    }
+
+    pub fn from_meta(m: SockMeta) -> Option<Self> {
+        if m.has_addr() {
+            Some(Self::from_meta_unchecked(m))
+        } else {
+            None
+        }
+    }
+
+    fn from_meta_unchecked(m: SockMeta) -> Self {
+        Self {
+            family: m.family,
+            dport_be: m.dport_be,
+            daddr: m.daddr,
+        }
+    }
+
+    pub fn v4_addr(self) -> Option<u32> {
+        if self.family == AF_INET as u8 {
+            Some(u32::from_ne_bytes([
+                self.daddr[0],
+                self.daddr[1],
+                self.daddr[2],
+                self.daddr[3],
+            ]))
+        } else {
+            None
+        }
+    }
+
+    pub fn is_v6(self) -> bool {
+        self.family == AF_INET6 as u8
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +89,7 @@ struct Pending {
     ts_ns: u64,
     prefix: Vec<u8>,
     at: Instant,
+    cgroup_id: u64,
 }
 
 /// Completed HTTP exchange (raw prefixes; parse later).
@@ -62,7 +102,11 @@ pub struct Exchange {
     pub t_start_ns: u64,
     pub t_end_ns: u64,
     /// Filled by userspace from `SOCK_META` after correlation (Phase 4 Q1).
-    pub peer: Option<PeerV4>,
+    pub peer: Option<PeerAddr>,
+    /// First half was Write (client). False = server read→write.
+    pub req_is_write: bool,
+    /// From request-half `SockIoEvent.cgroup_id` (k8s src identity).
+    pub cgroup_id: u64,
 }
 
 impl Exchange {
@@ -116,6 +160,7 @@ impl Correlator {
                         ts_ns: ev.ts_ns,
                         prefix,
                         at: now,
+                        cgroup_id: ev.cgroup_id,
                     },
                 );
                 None
@@ -141,6 +186,7 @@ impl Correlator {
                                 ts_ns: ev.ts_ns,
                                 prefix,
                                 at: now,
+                                cgroup_id: ev.cgroup_id,
                             },
                         );
                     }
@@ -155,6 +201,8 @@ impl Correlator {
                     t_start_ns: pending.ts_ns,
                     t_end_ns: ev.ts_ns,
                     peer: None,
+                    req_is_write: pending.dir == IoDir::Write,
+                    cgroup_id: pending.cgroup_id,
                 })
             }
         }
@@ -203,6 +251,7 @@ mod tests {
             tgid: 42,
             ret: n as i64,
             ts_ns,
+            cgroup_id: 0,
             prefix,
         }
     }
@@ -221,6 +270,7 @@ mod tests {
             )
             .expect("exchange");
         assert_eq!(ex.latency_ns(), 1_050_000_000 - 1_000);
+        assert!(ex.req_is_write);
         assert!(ex.req_prefix.starts_with(b"GET "));
         assert!(ex.resp_prefix.starts_with(b"HTTP/"));
         assert_eq!(c.pending_len(), 0);
@@ -237,6 +287,7 @@ mod tests {
             .observe(&io(IoDir::Write, 7, 500, b"HTTP/1.1 201 Created\r\n"), now)
             .expect("exchange");
         assert_eq!(ex.latency_ns(), 490);
+        assert!(!ex.req_is_write);
     }
 
     #[test]

@@ -53,6 +53,13 @@ Userspace binary that loads BPF and serves CLI / export.
 | `src/redaction/` | Header/secret scrubbing |
 | `src/otel/` | OTLP export |
 | `src/dashboard/` | Ratatui UI |
+| `src/reassemble.rs` | Phase 6 — 8 KiB per-fd buffer |
+| `src/filter.rs` | Phase 6 — comm allow/deny; Phase 11 fills `DENIED_TGID` or `ALLOWED_TGID` |
+| `src/sample.rs` | Phase 11 — BPF SAMPLE_N auto/pin policy |
+| `src/h2/` | Phase 7 — frames, HPACK subset, stream FSM |
+| `src/dual_plane.rs` | Phase 8 — TlsIo content × SockIoTimes |
+| `src/trace_export.rs` | Phase 9 — OTLP `/v1/traces` JSON |
+| `src/profile.rs` | Phase 12 — stack join (off by default) |
 
 ### `xtask/`
 
@@ -85,7 +92,9 @@ Local targets for Milestone 1–4 validation. Not production code.
 | `design-notes/` | Interview-depth writeups |
 | `verifier-rejection-log.md` | Append-only scar log |
 | `overhead-measurements.md` | Numbers per phase |
-| `ROADMAP.md` | Phase checklist |
+| `phases/` | Phase checklists + implementation plans (0–12) + [VISION-95.md](../phases/VISION-95.md) |
+| `testing/` | TDD evidence per phase |
+| `handoff/` | Session notes; [SESSION-VISION-95.md](../handoff/SESSION-VISION-95.md) claim lock |
 
 ### `scripts/`
 
@@ -108,10 +117,12 @@ Developer UX: BTF check, loadgen, overhead sampling. Keep these runnable without
 ## Growth path
 
 ```
-Phase 0:  common (minimal) + ebpf hello + agent loader stub + xtask
-Phase 1:  ebpf/connect + socket + agent/consumer + dashboard
-Phase 2:  ebpf/http_capture + agent/http + correlation + hist
-Phase 3:  ebpf TLS uprobes + TlsIo → existing correlator (TLS-only; no dual-plane merge)
-Phase 4:  identity + service_map + otel + deploy/
-Stretch:  http2 module, profiling module
+Phase 0–5:  demo (HTTP/1.1, OpenSSL TLS-only, kind metrics)
+Phase 6:    writev/sendmsg + reassemble + deny-list + SockMeta v6
+Phase 7:    agent/h2 (frames, HPACK subset, gRPC :path)
+Phase 8:    SockIoTimes + TlsHandshake; dual-plane join
+Phase 9:    OTLP traces + Grafana
+Phase 10:   k3s real-node identity + Service ClusterIP dest join
+Phase 11:   SAMPLE_N + vision95-load perf stat
+Phase 12:   STACKS RingBuf + blazesym join; claim lock
 ```

@@ -20,10 +20,13 @@ spec:
           image: ebpf-obs-agent:latest
           imagePullPolicy: IfNotPresent
           env:
+            # OTLP on via endpoint below. Ingest drops this process (tgid/comm)
+            # and k8s-default otelcol — not a :4318 denylist.
             - name: OBSAGENT_HEADLESS
               value: "1"
+            # warn by default; k8s_index refresh sizes are the dest-join heartbeat.
             - name: RUST_LOG
-              value: warn
+              value: warn,obsagent::k8s_index=info
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: http://otel-collector.observability.svc:4318
           securityContext:
@@ -31,7 +34,7 @@ spec:
             capabilities:
               drop: ["ALL"]
               add: ["BPF", "PERFMON", "SYS_PTRACE", "SYS_RESOURCE"]
-            # If the cluster kernel rejects distinct caps, set privileged: true instead.
+            # If k3s rejects CAP_BPF, e2e-k3s.sh retries with privileged: true.
           volumeMounts:
             - name: btf
               mountPath: /sys/kernel/btf
@@ -41,6 +44,9 @@ spec:
               readOnly: true
             - name: proc
               mountPath: /host/proc
+              readOnly: true
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
               readOnly: true
           resources:
             requests:
@@ -59,3 +65,6 @@ spec:
         - name: proc
           hostPath:
             path: /proc
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup

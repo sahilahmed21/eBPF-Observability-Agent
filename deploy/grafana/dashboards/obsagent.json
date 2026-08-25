@@ -7,24 +7,50 @@
   "links": [],
   "panels": [
     {
-      "title": "HTTP client latency (p50/p95 approx via histogram)",
+      "title": "HTTP latency p50/p99 (exclude grpc)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(http_client_duration_bucket[1m])) by (le, http_route))",
+          "expr": "histogram_quantile(0.50, sum(rate(http_client_duration_milliseconds_bucket{http_protocol!=\"grpc\"}[1m])) by (le, http_route))",
           "legendFormat": "p50 {{http_route}}"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(http_client_duration_bucket[1m])) by (le, http_route))",
-          "legendFormat": "p95 {{http_route}}"
+          "expr": "histogram_quantile(0.99, sum(rate(http_client_duration_milliseconds_bucket{http_protocol!=\"grpc\"}[1m])) by (le, http_route))",
+          "legendFormat": "p99 {{http_route}}"
         }
       ]
     },
     {
-      "title": "HTTP request rate",
+      "title": "gRPC latency p50/p99",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_client_duration_milliseconds_bucket{http_protocol=\"grpc\"}[1m])) by (le, http_route))",
+          "legendFormat": "p50 {{http_route}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_client_duration_milliseconds_bucket{http_protocol=\"grpc\"}[1m])) by (le, http_route))",
+          "legendFormat": "p99 {{http_route}}"
+        }
+      ]
+    },
+    {
+      "title": "TLS handshake p50",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(tls_handshake_duration_milliseconds_bucket[1m])) by (le))",
+          "legendFormat": "p50"
+        }
+      ]
+    },
+    {
+      "title": "Request rate by edge",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "targets": [
         {
           "expr": "sum(rate(http_client_requests_total[1m])) by (src, dst)",
@@ -35,22 +61,57 @@
     {
       "title": "Agent drops",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "targets": [
         {
           "expr": "obsagent_events_dropped_total",
-          "legendFormat": "ringbuf drops"
+          "legendFormat": "ringbuf"
         },
         {
           "expr": "obsagent_otlp_dropped_total",
-          "legendFormat": "otlp drops"
+          "legendFormat": "otlp"
+        },
+        {
+          "expr": "obsagent_traces_dropped_total",
+          "legendFormat": "traces_queue"
+        },
+        {
+          "expr": "obsagent_traces_export_failed_total",
+          "legendFormat": "traces_export"
+        }
+      ]
+    },
+    {
+      "title": "Trace sampling",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "rate(obsagent_traces_sampled_total[1m])",
+          "legendFormat": "sampled"
+        },
+        {
+          "expr": "rate(obsagent_traces_not_sampled_total[1m])",
+          "legendFormat": "not_sampled"
+        }
+      ]
+    },
+    {
+      "title": "Service map (src → dst)",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum by (src, dst) (increase(http_client_requests_total[5m]))",
+          "format": "table",
+          "instant": true
         }
       ]
     },
     {
       "title": "Service map edge count",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
       "targets": [
         {
           "expr": "obsagent_service_map_edges",
@@ -60,11 +121,11 @@
     }
   ],
   "schemaVersion": 39,
-  "tags": ["obsagent", "ebpf", "phase5"],
+  "tags": ["obsagent", "ebpf", "phase9"],
   "templating": { "list": [] },
   "time": { "from": "now-15m", "to": "now" },
   "timezone": "browser",
   "title": "eBPF Observability Agent",
-  "uid": "obsagent-phase5",
-  "version": 1
+  "uid": "obsagent-phase9",
+  "version": 2
 }

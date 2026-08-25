@@ -2,18 +2,24 @@
 #![no_main]
 
 use aya_ebpf::{
+    EbpfContext,
     helpers::{
-        bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user,
-        bpf_probe_read_user_buf,
+        bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_prandom_u32, bpf_ktime_get_ns,
+        bpf_probe_read_user, bpf_probe_read_user_buf,
     },
-    macros::{kprobe, map, tracepoint, uprobe, uretprobe},
+    macros::{kprobe, map, perf_event, tracepoint, uprobe, uretprobe},
     maps::{Array, HashMap, PerCpuArray, RingBuf},
-    programs::{ProbeContext, RetProbeContext, TracePointContext},
+    programs::{PerfEventContext, ProbeContext, RetProbeContext, TracePointContext},
 };
+use aya_ebpf::bindings::BPF_F_USER_STACK;
+use aya_ebpf::helpers::bpf_get_stack;
 use aya_log_ebpf::info;
 use obsagent_common::{
-    AF_INET, EVENTS_RINGBUF_BYTES, EventKind, IoDir, PENDING_MAP_ENTRIES, PendingEnter,
-    PendingIo, PendingTls, SOCK_IO_PREFIX_LEN, SockIoEvent, SockLatencyEvent, SockMeta,
+    AF_INET, AF_INET6, EVENTS_RINGBUF_BYTES, EventKind, IO_BUF_LEN_UNBOUNDED, IoDir,
+    PENDING_MAP_ENTRIES, PendingEnter, PendingIo, PendingTls, SOCK_IO_PREFIX_LEN, SockIoEvent,
+    SockIoTimesEvent, SockLatencyEvent, SockMeta, SockMetaKeep, StackSampleEvent,
+    STACKS_RINGBUF_BYTES, STACK_SAMPLE_MAX_FRAMES, TlsHandshakeEvent,
+    DENIED_TGID_ENTRIES, ALLOWED_TGID_ENTRIES, http_magic, io_copy_len,
 };
 
 // Tracepoint field offsets from this kernel's format files (WSL2 6.6).
@@ -21,6 +27,9 @@ const ENTER_FD_OFF: usize = 16;
 const ENTER_SOCKADDR_OFF: usize = 24;
 const ENTER_BUF_OFF: usize = 24;
 const EXIT_RET_OFF: usize = 16;
+// writev/readv: arg1 is `struct iovec *` at ENTER_BUF_OFF.
+// sendmsg/recvmsg: arg1 is `struct user_msghdr *` at ENTER_BUF_OFF.
+// linux/socket.h user_msghdr: msg_iov at offset 16 on x86_64 (msg_name + msg_namelen + pad).
 
 #[map]
 static PENDING: HashMap<u32, PendingEnter> =
@@ -61,13 +70,63 @@ static FD_SSL: HashMap<u64, u64> =
 static TLS_FDS: HashMap<u64, u8> =
     HashMap::<u64, u8>::with_max_entries(PENDING_MAP_ENTRIES, 0);
 
+/// HTTP-magic emit sets this; continuation prefixes skip magic. Cleared on
+/// close and by userspace after a header half-flush.
+#[map]
+static INFLIGHT: HashMap<u64, u8> =
+    HashMap::<u64, u8>::with_max_entries(PENDING_MAP_ENTRIES, 0);
+
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(EVENTS_RINGBUF_BYTES, 0);
+
+/// Phase 12: perf_event stack samples (separate from HTTP `EVENTS`).
+#[map]
+static STACKS: RingBuf = RingBuf::with_byte_size(STACKS_RINGBUF_BYTES, 0);
 
 #[map]
 static DROPS: Array<u64> = Array::with_max_entries(1, 0);
 
-/// Scratch for SockIoEvent (288B) — avoid BPF stack overflow.
+#[map]
+static STACK_DROPS: Array<u64> = Array::with_max_entries(1, 0);
+
+/// I/O keep denominator. Userspace writes 1,2,4,8,16 or a pin. `n <= 1` keep all.
+#[map]
+static SAMPLE_N: Array<u32> = Array::with_max_entries(1, 0);
+
+/// Processes that must never be captured (deny-list mode). Presence = skip.
+#[map]
+static DENIED_TGID: HashMap<u32, u8> =
+    HashMap::<u32, u8>::with_max_entries(DENIED_TGID_ENTRIES, 0);
+
+/// Exclusive allow-list mode: capture only if present. Used when ALLOW_ONLY[0] != 0.
+#[map]
+static ALLOWED_TGID: HashMap<u32, u8> =
+    HashMap::<u32, u8>::with_max_entries(ALLOWED_TGID_ENTRIES, 0);
+
+/// 0 = deny-list (`DENIED_TGID`). Non-zero = allow-only (`ALLOWED_TGID`).
+#[map]
+static ALLOW_ONLY: Array<u32> = Array::with_max_entries(1, 0);
+
+/// SSL* seen without `SSL_FD` (custom BIO residual).
+#[map]
+static TLS_UNMAPPED: Array<u64> = Array::with_max_entries(1, 0);
+
+/// SSL* already counted in `tls_unmapped` (once per object, not per SSL_read).
+#[map]
+static UNMAPPED_SEEN: HashMap<u64, u8> =
+    HashMap::<u64, u8>::with_max_entries(PENDING_MAP_ENTRIES, 0);
+
+/// First `SSL_do_handshake` enter ts keyed by SSL*.
+#[map]
+static HANDSHAKE_START: HashMap<u64, u64> =
+    HashMap::<u64, u64>::with_max_entries(PENDING_MAP_ENTRIES, 0);
+
+/// tid → SSL* so uretprobe can recover the pointer.
+#[map]
+static PENDING_HS: HashMap<u32, u64> =
+    HashMap::<u32, u64>::with_max_entries(PENDING_MAP_ENTRIES, 0);
+
+/// Scratch for SockIoEvent (296B) — avoid BPF stack overflow.
 #[map]
 static IO_SCRATCH: PerCpuArray<SockIoEvent> = PerCpuArray::with_max_entries(1, 0);
 
@@ -76,6 +135,16 @@ struct SockAddrIn {
     sin_family: u16,
     sin_port: u16,
     sin_addr: u32,
+}
+
+/// Userspace `sockaddr_in6` (uapi linux/in6.h). Do not use kernel `msghdr`.
+#[repr(C)]
+struct SockAddrIn6 {
+    sin6_family: u16,
+    sin6_port: u16,
+    sin6_flowinfo: u32,
+    sin6_addr: [u8; 16],
+    sin6_scope_id: u32,
 }
 
 fn tid() -> u32 {
@@ -91,13 +160,20 @@ fn sock_fd_key(tgid: u32, fd: u32) -> u64 {
     ((tgid as u64) << 32) | (fd as u64)
 }
 
-fn mark_sock_meta(fd: i64, daddr_be: u32, dport_be: u16) {
+fn mark_sock_meta(fd: i64, mut meta: SockMeta) {
     if fd < 0 || fd > u32::MAX as i64 {
         return;
     }
     let (tgid, _) = pid_tgid();
+    if !tgid_captured(tgid) {
+        return;
+    }
     let key = sock_fd_key(tgid, fd as u32);
-    let meta = SockMeta::with_peer(daddr_be, dport_be);
+    let old = unsafe { SOCK_META.get(&key) }.copied();
+    meta = meta.merge_peer_preserve_sample(old);
+    if old.and_then(SockMeta::io_sampled_keep).is_none() {
+        apply_keep_io_flags(&mut meta);
+    }
     let _ = SOCK_META.insert(&key, &meta, 0);
 }
 
@@ -106,6 +182,7 @@ fn unmark_sock_fd(fd: u32) {
     let key = sock_fd_key(tgid, fd);
     let _ = SOCK_META.remove(&key);
     let _ = TLS_FDS.remove(&key);
+    let _ = INFLIGHT.remove(&key);
     clear_ssl_for_fd_key(key, fd as i32);
 }
 
@@ -115,6 +192,8 @@ fn clear_ssl_for_fd_key(key: u64, fd: i32) {
     };
     let ssl = *ssl;
     let _ = FD_SSL.remove(&key);
+    let _ = HANDSHAKE_START.remove(&ssl);
+    let _ = UNMAPPED_SEEN.remove(&ssl);
     if let Some(mapped) = unsafe { SSL_FD.get(&ssl) } {
         if *mapped == fd {
             let _ = SSL_FD.remove(&ssl);
@@ -126,6 +205,8 @@ fn clear_ssl_ptr(ssl: u64) {
     if ssl == 0 {
         return;
     }
+    let _ = HANDSHAKE_START.remove(&ssl);
+    let _ = UNMAPPED_SEEN.remove(&ssl);
     let Some(fd) = (unsafe { SSL_FD.get(&ssl) }) else {
         return;
     };
@@ -156,6 +237,22 @@ fn is_tls_fd(fd: u32) -> bool {
     unsafe { TLS_FDS.get(&key).is_some() }
 }
 
+fn is_inflight(fd: u32) -> bool {
+    let (tgid, _) = pid_tgid();
+    let key = sock_fd_key(tgid, fd);
+    unsafe { INFLIGHT.get(&key).is_some() }
+}
+
+fn mark_inflight(fd: i32) {
+    if fd < 0 {
+        return;
+    }
+    let (tgid, _) = pid_tgid();
+    let key = sock_fd_key(tgid, fd as u32);
+    let one: u8 = 1;
+    let _ = INFLIGHT.insert(&key, &one, 0);
+}
+
 fn mark_tls_fd(fd: i32) {
     if fd < 0 {
         return;
@@ -174,16 +271,114 @@ fn bump_drop() {
     }
 }
 
-fn read_sockaddr_v4(ptr: *const SockAddrIn) -> Result<(u32, u16), i64> {
-    let sa: SockAddrIn = unsafe { bpf_probe_read_user(ptr)? };
-    if sa.sin_family != AF_INET {
-        return Err(1);
+fn bump_stack_drop() {
+    if let Some(ptr) = STACK_DROPS.get_ptr_mut(0) {
+        unsafe {
+            *ptr += 1;
+        }
     }
-    Ok((sa.sin_addr, sa.sin_port))
+}
+
+fn is_denied(tgid: u32) -> bool {
+    unsafe { DENIED_TGID.get(&tgid).is_some() }
+}
+
+fn allow_only_mode() -> bool {
+    matches!(ALLOW_ONLY.get(0), Some(n) if *n != 0)
+}
+
+/// Whether this tgid may emit at all (deny-list vs allow-only).
+fn tgid_captured(tgid: u32) -> bool {
+    if allow_only_mode() {
+        unsafe { ALLOWED_TGID.get(&tgid).is_some() }
+    } else {
+        !is_denied(tgid)
+    }
+}
+
+fn read_sample_n() -> u32 {
+    match SAMPLE_N.get(0) {
+        Some(n) => *n,
+        None => 1,
+    }
+}
+
+fn draw_keep_io() -> bool {
+    let n = read_sample_n();
+    if n <= 1 {
+        return true;
+    }
+    (unsafe { bpf_get_prandom_u32() }) % n == 0
+}
+
+fn apply_keep_io_flags(meta: &mut SockMeta) {
+    meta.set_io_keep(draw_keep_io());
+}
+
+/// Sticky I/O keep for a **marked** fd. Does not create `SOCK_META`.
+fn existing_fd_keep_io(fd: u32) -> bool {
+    let (tgid, _) = pid_tgid();
+    if !tgid_captured(tgid) {
+        return false;
+    }
+    let key = sock_fd_key(tgid, fd);
+    let meta = unsafe { SOCK_META.get(&key) }.copied();
+    match SockMeta::keep_from_lookup(meta) {
+        SockMetaKeep::Unmarked => false,
+        SockMetaKeep::Decided(keep) => keep,
+        SockMetaKeep::Undecided => {
+            let Some(mut m) = meta else {
+                return false;
+            };
+            apply_keep_io_flags(&mut m);
+            let keep = m.flags & SockMeta::FLAG_KEEP_IO != 0;
+            // BPF_EXIST: never create a SOCK_META that connect/accept did not mark.
+            let _ = SOCK_META.insert(&key, &m, 2);
+            keep
+        }
+    }
+}
+
+fn bump_unmapped() {
+    if let Some(ptr) = TLS_UNMAPPED.get_ptr_mut(0) {
+        unsafe {
+            *ptr += 1;
+        }
+    }
+}
+
+fn bump_unmapped_ssl(ssl: u64) {
+    if ssl == 0 {
+        return;
+    }
+    if unsafe { UNMAPPED_SEEN.get(&ssl) }.is_some() {
+        return;
+    }
+    let one: u8 = 1;
+    if UNMAPPED_SEEN.insert(&ssl, &one, 0).is_err() {
+        return;
+    }
+    bump_unmapped();
+}
+
+fn read_sockaddr(ptr: u64) -> Result<SockMeta, i64> {
+    let fam: u16 = unsafe { bpf_probe_read_user(ptr as *const u16)? };
+    if fam == AF_INET {
+        let sa: SockAddrIn = unsafe { bpf_probe_read_user(ptr as *const SockAddrIn)? };
+        Ok(SockMeta::with_peer_v4(sa.sin_addr, sa.sin_port))
+    } else if fam == AF_INET6 {
+        let sa: SockAddrIn6 = unsafe { bpf_probe_read_user(ptr as *const SockAddrIn6)? };
+        Ok(SockMeta::with_peer_v6(sa.sin6_addr, sa.sin6_port))
+    } else {
+        Err(1)
+    }
 }
 
 fn emit(kind: EventKind, ret: i64, latency_ns: u64, ts_ns: u64, daddr_be: u32, dport_be: u16) {
     let (tgid, pid) = pid_tgid();
+    if !tgid_captured(tgid) {
+        return;
+    }
     let Some(mut slot) = EVENTS.reserve::<SockLatencyEvent>(0) else {
         bump_drop();
         return;
@@ -205,38 +400,29 @@ fn emit(kind: EventKind, ret: i64, latency_ns: u64, ts_ns: u64, daddr_be: u32, d
 }
 
 fn looks_like_http_fixed(prefix: &[u8; SOCK_IO_PREFIX_LEN], len: u16) -> bool {
-    if len < 4 {
-        return false;
-    }
-    let a = prefix[0];
-    let b = prefix[1];
-    let c = prefix[2];
-    let d = prefix[3];
-    (a == b'G' && b == b'E' && c == b'T' && d == b' ')
-        || (a == b'P' && b == b'O' && c == b'S' && d == b'T')
-        || (a == b'P' && b == b'U' && c == b'T' && d == b' ')
-        || (a == b'H' && b == b'E' && c == b'A' && d == b'D')
-        || (a == b'H' && b == b'T' && c == b'T' && d == b'P')
-        || (a == b'D' && b == b'E' && c == b'L' && d == b'E')
-        || (a == b'P' && b == b'A' && c == b'T' && d == b'C')
-        || (a == b'O' && b == b'P' && c == b'T' && d == b'I')
+    http_magic(prefix, len)
 }
 
 fn emit_io(pending: &PendingIo, ret: i64) {
-    emit_io_kind(EventKind::SockIo, pending.buf_ptr, pending.fd, pending.dir, ret);
+    emit_io_kind(EventKind::SockIo, pending, ret);
 }
 
-fn emit_io_kind(kind: EventKind, buf_ptr: u64, fd: i32, dir: u8, ret: i64) {
+fn emit_io_kind(kind: EventKind, pending: &PendingIo, ret: i64) {
     let now = unsafe { bpf_ktime_get_ns() };
     let (tgid, pid) = pid_tgid();
+    let buf_ptr = pending.buf_ptr;
+    let buf_len = pending.buf_len;
+    let fd = pending.fd;
+    let dir = pending.dir;
 
-    let prefix_len: u16 = if ret <= 0 {
-        0
-    } else if ret as usize > SOCK_IO_PREFIX_LEN {
-        SOCK_IO_PREFIX_LEN as u16
-    } else {
-        ret as u16
-    };
+    if fd < 0 || !existing_fd_keep_io(fd as u32) {
+        return;
+    }
+
+    let prefix_len = io_copy_len(ret, buf_len);
+    if prefix_len == 0 {
+        return;
+    }
 
     let Some(scratch) = IO_SCRATCH.get_ptr_mut(0) else {
         return;
@@ -250,16 +436,25 @@ fn emit_io_kind(kind: EventKind, buf_ptr: u64, fd: i32, dir: u8, ret: i64) {
     ev.tgid = tgid;
     ev.ret = ret;
     ev.ts_ns = now;
+    ev.cgroup_id = unsafe { bpf_get_current_cgroup_id() };
     ev.prefix = [0; SOCK_IO_PREFIX_LEN];
 
-    // Copy at most prefix_len bytes. Verifier needs a fixed dest size; we use the
-    // full array but only treat prefix_len as valid (userspace caps too).
-    if prefix_len > 0 {
-        let _ = unsafe { bpf_probe_read_user_buf(buf_ptr as *const u8, &mut ev.prefix) };
+    if unsafe { bpf_probe_read_user_buf(buf_ptr as *const u8, &mut ev.prefix) }.is_err() {
+        return;
+    }
+    // Verifier needs a fixed dest size for the probe-read. Zero the tail so
+    // adjacent userspace bytes never leave the scratch slot.
+    let n = prefix_len as usize;
+    let mut i = 0usize;
+    while i < SOCK_IO_PREFIX_LEN {
+        if i >= n {
+            ev.prefix[i] = 0;
+        }
+        i += 1;
     }
 
-    // Second gate: skip non-HTTP on marked sockets (SSH, etc.).
-    if !looks_like_http_fixed(&ev.prefix, prefix_len) {
+    let magic = looks_like_http_fixed(&ev.prefix, prefix_len);
+    if !magic && !is_inflight(fd as u32) {
         return;
     }
 
@@ -269,31 +464,99 @@ fn emit_io_kind(kind: EventKind, buf_ptr: u64, fd: i32, dir: u8, ret: i64) {
     };
     slot.write(*ev);
     slot.submit(0);
+    if magic {
+        mark_inflight(fd);
+    }
 }
 
 fn try_enter_io(ctx: &TracePointContext, dir: IoDir) -> Result<(), i64> {
     let fd: u64 = unsafe { ctx.read_at(ENTER_FD_OFF)? };
-    let fd = fd as u32;
-    // Q8: TLS-marked fds skip Phase 2 sock I/O (ciphertext).
-    if is_tls_fd(fd) {
-        return Ok(());
-    }
-    // Q4: only fds marked via connect/accept (enter-side — cheap).
-    if !is_marked_sock_fd(fd) {
-        return Ok(());
-    }
     let buf_ptr: u64 = unsafe { ctx.read_at(ENTER_BUF_OFF)? };
-    if buf_ptr == 0 {
+    stash_pending_io(fd as u32, buf_ptr, IO_BUF_LEN_UNBOUNDED, dir)
+}
+
+#[repr(C)]
+struct IoVec {
+    base: u64,
+    len: u64,
+}
+
+fn stash_pending_io(fd: u32, buf_ptr: u64, buf_len: u32, dir: IoDir) -> Result<(), i64> {
+    let (tgid, _) = pid_tgid();
+    if !tgid_captured(tgid) {
+        return Ok(());
+    }
+    if is_tls_fd(fd) {
+        if !existing_fd_keep_io(fd) {
+            return Ok(());
+        }
+        let pending = PendingIo {
+            buf_ptr: 0,
+            buf_len: 0,
+            fd: fd as i32,
+            dir: dir as u8,
+            timing_only: 1,
+            _pad: [0; 2],
+        };
+        PENDING_IO.insert(&tid(), &pending, 0)?;
+        return Ok(());
+    }
+    if !is_marked_sock_fd(fd) || buf_ptr == 0 {
+        return Ok(());
+    }
+    if !existing_fd_keep_io(fd) {
         return Ok(());
     }
     let pending = PendingIo {
         buf_ptr,
+        buf_len,
         fd: fd as i32,
         dir: dir as u8,
-        _pad: [0; 3],
+        timing_only: 0,
+        _pad: [0; 2],
     };
     PENDING_IO.insert(&tid(), &pending, 0)?;
     Ok(())
+}
+
+fn iov_len_u32(len: u64) -> u32 {
+    if len > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        len as u32
+    }
+}
+
+fn try_enter_iov(ctx: &TracePointContext, dir: IoDir) -> Result<(), i64> {
+    let fd: u64 = unsafe { ctx.read_at(ENTER_FD_OFF)? };
+    let iov_ptr: u64 = unsafe { ctx.read_at(ENTER_BUF_OFF)? };
+    if iov_ptr == 0 {
+        return Ok(());
+    }
+    let iov: IoVec = unsafe { bpf_probe_read_user(iov_ptr as *const IoVec)? };
+    stash_pending_io(fd as u32, iov.base, iov_len_u32(iov.len), dir)
+}
+
+#[repr(C)]
+struct UserMsgHdrIov {
+    _name: u64,
+    _namelen: u32,
+    _pad: u32,
+    msg_iov: u64,
+}
+
+fn try_enter_msghdr(ctx: &TracePointContext, dir: IoDir) -> Result<(), i64> {
+    let fd: u64 = unsafe { ctx.read_at(ENTER_FD_OFF)? };
+    let msg: u64 = unsafe { ctx.read_at(ENTER_BUF_OFF)? };
+    if msg == 0 {
+        return Ok(());
+    }
+    let hdr: UserMsgHdrIov = unsafe { bpf_probe_read_user(msg as *const UserMsgHdrIov)? };
+    if hdr.msg_iov == 0 {
+        return Ok(());
+    }
+    let iov: IoVec = unsafe { bpf_probe_read_user(hdr.msg_iov as *const IoVec)? };
+    stash_pending_io(fd as u32, iov.base, iov_len_u32(iov.len), dir)
 }
 
 #[kprobe]
@@ -320,19 +583,22 @@ pub fn enter_connect(ctx: TracePointContext) -> u32 {
 }
 
 fn try_enter_connect(ctx: &TracePointContext) -> Result<(), i64> {
+    let (tgid, _) = pid_tgid();
+    if !tgid_captured(tgid) {
+        return Ok(());
+    }
     let fd: u64 = unsafe { ctx.read_at(ENTER_FD_OFF)? };
 
-    let sockaddr: *const SockAddrIn = unsafe { ctx.read_at(ENTER_SOCKADDR_OFF)? };
-    let (daddr_be, dport_be) = match read_sockaddr_v4(sockaddr) {
+    let sockaddr: u64 = unsafe { ctx.read_at(ENTER_SOCKADDR_OFF)? };
+    let meta = match read_sockaddr(sockaddr) {
         Ok(v) => v,
-        Err(_) => return Ok(()), // non-IPv4: ignore (P1 Q4)
+        Err(_) => return Ok(()),
     };
-    // Phase 4 Q1: store peer with the fd mark (was presence-only SOCK_FDS).
-    mark_sock_meta(fd as i64, daddr_be, dport_be);
+    mark_sock_meta(fd as i64, meta);
     let pending = PendingEnter {
         ts_ns: unsafe { bpf_ktime_get_ns() },
-        daddr_be,
-        dport_be,
+        daddr_be: meta.v4_addr().unwrap_or(0),
+        dport_be: meta.dport_be,
         has_addr: 1,
         _pad: 0,
         sockaddr_ptr: 0,
@@ -360,6 +626,10 @@ pub fn enter_accept4(ctx: TracePointContext) -> u32 {
 }
 
 fn try_enter_accept4(ctx: &TracePointContext) -> Result<(), i64> {
+    let (tgid, _) = pid_tgid();
+    if !tgid_captured(tgid) {
+        return Ok(());
+    }
     let sockaddr: u64 = unsafe { ctx.read_at(ENTER_SOCKADDR_OFF)? };
     let pending = PendingEnter {
         ts_ns: unsafe { bpf_ktime_get_ns() },
@@ -392,8 +662,8 @@ fn try_exit_accept4(ctx: &TracePointContext) -> Result<(), i64> {
     let ret: i64 = unsafe { ctx.read_at(EXIT_RET_OFF)? };
     let now = unsafe { bpf_ktime_get_ns() };
     let latency_ns = now.saturating_sub(pending.ts_ns);
-    let (daddr_be, dport_be) = peer_addr(&pending, ret);
-    mark_sock_meta(ret, daddr_be, dport_be);
+    let (daddr_be, dport_be, meta) = peer_addr(&pending, ret);
+    mark_sock_meta(ret, meta);
     emit(EventKind::Accept, ret, latency_ns, now, daddr_be, dport_be);
     Ok(())
 }
@@ -409,21 +679,26 @@ fn try_exit_kind(ctx: &TracePointContext, kind: EventKind) -> Result<(), i64> {
     let ret: i64 = unsafe { ctx.read_at(EXIT_RET_OFF)? };
     let now = unsafe { bpf_ktime_get_ns() };
     let latency_ns = now.saturating_sub(pending.ts_ns);
-    let (daddr_be, dport_be) = peer_addr(&pending, ret);
+    let (daddr_be, dport_be, _) = peer_addr(&pending, ret);
     emit(kind, ret, latency_ns, now, daddr_be, dport_be);
     Ok(())
 }
 
-fn peer_addr(pending: &PendingEnter, ret: i64) -> (u32, u16) {
+fn peer_addr(pending: &PendingEnter, ret: i64) -> (u32, u16, SockMeta) {
     if pending.has_addr == 1 {
-        (pending.daddr_be, pending.dport_be)
+        let meta = SockMeta::with_peer_v4(pending.daddr_be, pending.dport_be);
+        (pending.daddr_be, pending.dport_be, meta)
     } else if pending.sockaddr_ptr != 0 && ret >= 0 {
-        match read_sockaddr_v4(pending.sockaddr_ptr as *const SockAddrIn) {
-            Ok(v) => v,
-            Err(_) => (0, 0),
+        match read_sockaddr(pending.sockaddr_ptr) {
+            Ok(meta) => (
+                meta.v4_addr().unwrap_or(0),
+                meta.dport_be,
+                meta,
+            ),
+            Err(_) => (0, 0, SockMeta::with_peer_v4(0, 0)),
         }
     } else {
-        (0, 0)
+        (0, 0, SockMeta::with_peer_v4(0, 0))
     }
 }
 
@@ -509,6 +784,70 @@ pub fn exit_sendto(ctx: TracePointContext) -> u32 {
     }
 }
 
+#[tracepoint]
+pub fn enter_readv(ctx: TracePointContext) -> u32 {
+    match try_enter_iov(&ctx, IoDir::Read) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[tracepoint]
+pub fn exit_readv(ctx: TracePointContext) -> u32 {
+    match try_exit_io(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[tracepoint]
+pub fn enter_writev(ctx: TracePointContext) -> u32 {
+    match try_enter_iov(&ctx, IoDir::Write) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[tracepoint]
+pub fn exit_writev(ctx: TracePointContext) -> u32 {
+    match try_exit_io(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[tracepoint]
+pub fn enter_recvmsg(ctx: TracePointContext) -> u32 {
+    match try_enter_msghdr(&ctx, IoDir::Read) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[tracepoint]
+pub fn exit_recvmsg(ctx: TracePointContext) -> u32 {
+    match try_exit_io(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[tracepoint]
+pub fn enter_sendmsg(ctx: TracePointContext) -> u32 {
+    match try_enter_msghdr(&ctx, IoDir::Write) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[tracepoint]
+pub fn exit_sendmsg(ctx: TracePointContext) -> u32 {
+    match try_exit_io(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
 fn try_exit_io(ctx: &TracePointContext) -> Result<(), i64> {
     let tid = tid();
     let Some(pending) = (unsafe { PENDING_IO.get(&tid) }) else {
@@ -518,8 +857,38 @@ fn try_exit_io(ctx: &TracePointContext) -> Result<(), i64> {
     let _ = PENDING_IO.remove(&tid);
 
     let ret: i64 = unsafe { ctx.read_at(EXIT_RET_OFF)? };
-    emit_io(&pending, ret);
+    if pending.timing_only != 0 {
+        emit_times(&pending, ret);
+    } else {
+        emit_io(&pending, ret);
+    }
     Ok(())
+}
+
+fn emit_times(pending: &PendingIo, ret: i64) {
+    if ret <= 0 {
+        return;
+    }
+    if pending.fd < 0 || !existing_fd_keep_io(pending.fd as u32) {
+        return;
+    }
+    let now = unsafe { bpf_ktime_get_ns() };
+    let (tgid, pid) = pid_tgid();
+    let Some(mut slot) = EVENTS.reserve::<SockIoTimesEvent>(0) else {
+        bump_drop();
+        return;
+    };
+    slot.write(SockIoTimesEvent {
+        kind: EventKind::SockIoTimes as u8,
+        dir: pending.dir,
+        _pad: 0,
+        fd: pending.fd,
+        pid,
+        tgid,
+        ret,
+        ts_ns: now,
+    });
+    slot.submit(0);
 }
 
 // --- Phase 3: OpenSSL uprobes (Q1/Q7) ---
@@ -612,8 +981,14 @@ fn try_enter_ssl_io(ctx: &ProbeContext, dir: IoDir) -> Result<(), u32> {
     if ssl == 0 || buf == 0 {
         return Ok(());
     }
-    // Q1: require SSL_set_fd mapping before we bother stashing.
-    if unsafe { SSL_FD.get(&ssl) }.is_none() {
+    let fd = match unsafe { SSL_FD.get(&ssl) } {
+        Some(fd) if *fd >= 0 => *fd,
+        _ => {
+            bump_unmapped_ssl(ssl);
+            return Ok(());
+        }
+    };
+    if !existing_fd_keep_io(fd as u32) {
         return Ok(());
     }
     let pending = PendingTls {
@@ -635,7 +1010,14 @@ fn try_enter_ssl_io_ex(ctx: &ProbeContext, dir: IoDir) -> Result<(), u32> {
     if ssl == 0 || buf == 0 || outlen == 0 {
         return Ok(());
     }
-    if unsafe { SSL_FD.get(&ssl) }.is_none() {
+    let fd = match unsafe { SSL_FD.get(&ssl) } {
+        Some(fd) if *fd >= 0 => *fd,
+        _ => {
+            bump_unmapped_ssl(ssl);
+            return Ok(());
+        }
+    };
+    if !existing_fd_keep_io(fd as u32) {
         return Ok(());
     }
     let pending = PendingTls {
@@ -695,13 +1077,15 @@ fn try_exit_ssl_pending(ctx: &RetProbeContext, is_ex: bool) -> Result<(), u32> {
         }
     };
 
-    emit_io_kind(
-        EventKind::TlsIo,
-        pending.buf_ptr,
+    let io = PendingIo {
+        buf_ptr: pending.buf_ptr,
+        buf_len: IO_BUF_LEN_UNBOUNDED,
         fd,
-        pending.dir,
-        ret,
-    );
+        dir: pending.dir,
+        timing_only: 0,
+        _pad: [0; 2],
+    };
+    emit_io_kind(EventKind::TlsIo, &io, ret);
     Ok(())
 }
 
@@ -735,6 +1119,152 @@ pub fn exit_ssl_read_ex(ctx: RetProbeContext) -> u32 {
         Ok(()) => 0,
         Err(_) => 1,
     }
+}
+
+#[uprobe]
+pub fn enter_ssl_do_handshake(ctx: ProbeContext) -> u32 {
+    match try_enter_ssl_do_handshake(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[uretprobe]
+pub fn exit_ssl_do_handshake(ctx: RetProbeContext) -> u32 {
+    match try_exit_ssl_do_handshake(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+fn try_enter_ssl_do_handshake(ctx: &ProbeContext) -> Result<(), u32> {
+    let (tgid, _) = pid_tgid();
+    if !tgid_captured(tgid) {
+        return Ok(());
+    }
+    let ssl: u64 = ctx.arg(0).ok_or(1u32)?;
+    if ssl == 0 {
+        return Ok(());
+    }
+    let _ = PENDING_HS.insert(&tid(), &ssl, 0);
+    if unsafe { HANDSHAKE_START.get(&ssl) }.is_none() {
+        let ts = unsafe { bpf_ktime_get_ns() };
+        let _ = HANDSHAKE_START.insert(&ssl, &ts, 0);
+    }
+    Ok(())
+}
+
+fn try_exit_ssl_do_handshake(ctx: &RetProbeContext) -> Result<(), u32> {
+    let tid = tid();
+    let Some(ssl) = (unsafe { PENDING_HS.get(&tid) }) else {
+        return Ok(());
+    };
+    let ssl = *ssl;
+    let _ = PENDING_HS.remove(&tid);
+
+    let ret: i32 = ctx.ret();
+    if ret != 1 {
+        return Ok(());
+    }
+    let Some(start) = (unsafe { HANDSHAKE_START.get(&ssl) }) else {
+        return Ok(());
+    };
+    let start = *start;
+    let _ = HANDSHAKE_START.remove(&ssl);
+
+    let fd = match unsafe { SSL_FD.get(&ssl) } {
+        Some(fd) => *fd,
+        None => {
+            bump_unmapped_ssl(ssl);
+            return Ok(());
+        }
+    };
+
+    let now = unsafe { bpf_ktime_get_ns() };
+    let (tgid, pid) = pid_tgid();
+    if !tgid_captured(tgid) {
+        return Ok(());
+    }
+    let Some(mut slot) = EVENTS.reserve::<TlsHandshakeEvent>(0) else {
+        bump_drop();
+        return Ok(());
+    };
+    slot.write(TlsHandshakeEvent {
+        kind: EventKind::TlsHandshake as u8,
+        _pad0: [0; 7],
+        pid,
+        tgid,
+        fd,
+        _pad1: 0,
+        ret: ret as i64,
+        latency_ns: now.saturating_sub(start),
+        ts_ns: now,
+    });
+    slot.submit(0);
+    Ok(())
+}
+
+// --- Phase 12: perf_event stack samples (Q16) ---
+
+const STACK_BUF_BYTES: u32 = (STACK_SAMPLE_MAX_FRAMES * core::mem::size_of::<u64>()) as u32;
+
+#[perf_event]
+pub fn profile_sample(ctx: PerfEventContext) -> u32 {
+    match try_profile_sample(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+fn try_profile_sample(ctx: &PerfEventContext) -> Result<(), i32> {
+    let (tgid, pid) = pid_tgid();
+    let ts_ns = unsafe { bpf_ktime_get_ns() };
+    let Some(mut slot) = STACKS.reserve::<StackSampleEvent>(0) else {
+        bump_stack_drop();
+        return Ok(());
+    };
+    let mut stack = [0u8; STACK_BUF_BYTES as usize];
+    let len = unsafe {
+        bpf_get_stack(
+            ctx.as_ptr(),
+            stack.as_mut_ptr() as *mut core::ffi::c_void,
+            STACK_BUF_BYTES,
+            BPF_F_USER_STACK as u64,
+        )
+    };
+    if len <= 0 {
+        slot.discard(0);
+        return Ok(());
+    }
+    let n = (len as usize / core::mem::size_of::<u64>()).min(STACK_SAMPLE_MAX_FRAMES);
+    let mut ips = [0u64; STACK_SAMPLE_MAX_FRAMES];
+    let mut i = 0usize;
+    while i < n {
+        let off = i * core::mem::size_of::<u64>();
+        ips[i] = u64::from_ne_bytes([
+            stack[off],
+            stack[off + 1],
+            stack[off + 2],
+            stack[off + 3],
+            stack[off + 4],
+            stack[off + 5],
+            stack[off + 6],
+            stack[off + 7],
+        ]);
+        i += 1;
+    }
+    slot.write(StackSampleEvent {
+        kind: EventKind::StackSample as u8,
+        _pad0: [0; 7],
+        tgid,
+        pid,
+        ts_ns,
+        frame_count: n as u8,
+        _pad1: [0; 3],
+        ips,
+    });
+    slot.submit(0);
+    Ok(())
 }
 
 #[cfg(not(test))]

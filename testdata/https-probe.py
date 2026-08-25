@@ -15,6 +15,7 @@ def once(host: str, port: int, path: str) -> None:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    ctx.options |= ssl.OP_NO_TICKET
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
         body = resp.read(64)

@@ -1,4 +1,4 @@
-# Phase 4 — ServiceAccount + RBAC for pod identity enrichment.
+# ServiceAccount + RBAC: pods (src via cgroup UID) and services (ClusterIP dest).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -16,8 +16,8 @@ metadata:
   name: ebpf-obs-agent
 rules:
   - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

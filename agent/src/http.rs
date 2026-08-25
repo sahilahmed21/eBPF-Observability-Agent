@@ -5,16 +5,41 @@
 
 use crate::correlate::Exchange;
 
-/// Aggregation key: `METHOD + normalized_path` (Q9).
+/// Aggregation key: `METHOD + normalized_path` (Q9). Protocol is `http`/`h2`/`grpc`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct HttpEndpoint {
     pub method: String,
     pub path: String,
+    pub protocol: String,
 }
 
 impl HttpEndpoint {
+    pub fn http(method: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            method: method.into(),
+            path: path.into(),
+            protocol: "http".into(),
+        }
+    }
+
+    pub fn labeled(
+        protocol: impl Into<String>,
+        method: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Self {
+        Self {
+            method: method.into(),
+            path: path.into(),
+            protocol: protocol.into(),
+        }
+    }
+
     pub fn label(&self) -> String {
-        format!("{} {}", self.method, self.path)
+        if self.protocol == "http" {
+            format!("{} {}", self.method, self.path)
+        } else {
+            format!("{} {} {}", self.protocol, self.method, self.path)
+        }
     }
 }
 
@@ -23,10 +48,13 @@ pub struct ParsedExchange {
     pub endpoint: HttpEndpoint,
     pub status: u16,
     pub latency_ns: u64,
+    /// Syscall wire latency when dual-plane joined (HTTP/1.1 TLS only).
+    pub wire_ns: Option<u64>,
 }
 
-/// Strip sensitive headers in-place (Q14). Call before off-node export / logging.
-#[allow(dead_code)] // ponytail: no export sink yet; keep off hot path until there is one.
+/// Strip sensitive headers in-place (Q14). Prefix bytes are not span
+/// attributes; call this if a future sink exports raw prefixes.
+#[allow(dead_code)]
 pub fn redact_headers(buf: &mut [u8]) {
     for header in [b"authorization:" as &[u8], b"cookie:", b"set-cookie:"] {
         redact_header_line(buf, header);
@@ -101,9 +129,10 @@ pub fn parse_exchange(ex: &Exchange) -> Option<ParsedExchange> {
     let status = response.code?;
 
     Some(ParsedExchange {
-        endpoint: HttpEndpoint { method, path },
+        endpoint: HttpEndpoint::http(method, path),
         status,
         latency_ns: ex.latency_ns(),
+        wire_ns: None,
     })
 }
 
@@ -139,6 +168,8 @@ mod tests {
             t_start_ns: 0,
             t_end_ns: 1_000_000,
             peer: None,
+            req_is_write: true,
+            cgroup_id: 0,
         };
         let p = parse_exchange(&ex).expect("parsed");
         assert_eq!(p.endpoint.label(), "GET /users/:id");
@@ -156,10 +187,19 @@ mod tests {
             t_start_ns: 0,
             t_end_ns: 10,
             peer: None,
+            req_is_write: true,
+            cgroup_id: 0,
         };
         let p = parse_exchange(&ex).expect("partial");
         assert_eq!(p.endpoint.method, "GET");
         assert_eq!(p.endpoint.path, "/fast");
         assert_eq!(p.status, 404);
+    }
+
+    #[test]
+    fn grpc_label_includes_protocol() {
+        let ep = HttpEndpoint::labeled("grpc", "POST", "/slow.Slow/Sleep");
+        assert_eq!(ep.label(), "grpc POST /slow.Slow/Sleep");
+        assert_eq!(HttpEndpoint::http("GET", "/slow").label(), "GET /slow");
     }
 }

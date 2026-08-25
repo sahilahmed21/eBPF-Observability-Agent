@@ -29,3 +29,19 @@ Must **not** use rustls. CPython on this host imports `SSL_write_ex` / `SSL_read
 (see Phase 3 TDD evidence). Generate certs in smoke/correctness scripts via `openssl req -x509`.
 
 See [phase-3-implementation-plan.md](../phases/phase-3-implementation-plan.md) Q9.
+
+## grpc-slow (Phase 7)
+
+Tonic **h2c** (cleartext) **server**. The probe is a single `write_all` of preface + HEADERS + DATA so the 256 B first-iovec cap (Q8) contains `:path`. tonic's own client uses `writev` and hides HEADERS in iov[1+].
+
+```
+cargo build --release -p grpc-slow
+```
+
+Needs vendored `protoc` via `protoc-bin-vendored` (no host `protoc` required).
+
+## h2-tls (Phase 7)
+
+`h2-tls-server.py` / `h2-tls-probe.py` — stdlib `ssl` ALPN `h2`, hand-rolled frames, **libssl not rustls**.
+
+See [phase-3-implementation-plan.md](../phases/phase-3-implementation-plan.md) Q9.

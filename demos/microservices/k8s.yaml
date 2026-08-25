@@ -1,4 +1,8 @@
-# Demo microservices for Phase 4 service map (kind).
+# Demo microservices for the Phase 10 named-edge gate (k3s).
+#
+# Gate: frontend → Service ClusterIP `api` so scrape shows src=demo/frontend-…
+# and dst=demo/api (Service name, not a guessed replica).
+# TLS/gRPC extras exercise the same dest join; they are not the HTTP name gate.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -69,3 +73,136 @@ spec:
                   except Exception:
                       pass
                   time.sleep(1)
+---
+# OpenSSL HTTPS: CPython ssl → libssl. Certs are generated at start (no key in git).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-tls
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: api-tls }
+  template:
+    metadata:
+      labels: { app: api-tls }
+    spec:
+      containers:
+        - name: api-tls
+          image: python:3.12-slim
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              apt-get update -qq && apt-get install -y -qq openssl >/dev/null
+              openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/k.pem -out /tmp/c.pem -days 1 -subj /CN=api-tls.demo.svc
+              python -c '
+              import ssl
+              from http.server import BaseHTTPRequestHandler, HTTPServer
+              class H(BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+                  def log_message(self, *a): pass
+              ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+              ctx.load_cert_chain("/tmp/c.pem", "/tmp/k.pem")
+              httpd = HTTPServer(("0.0.0.0", 8443), H)
+              httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+              httpd.serve_forever()
+              '
+          ports:
+            - containerPort: 8443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-tls
+  namespace: demo
+spec:
+  selector: { app: api-tls }
+  ports:
+    - port: 8443
+      targetPort: 8443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-tls
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: frontend-tls }
+  template:
+    metadata:
+      labels: { app: frontend-tls }
+    spec:
+      containers:
+        - name: frontend-tls
+          image: python:3.12-slim
+          command: ["python", "-c"]
+          args:
+            - |
+              import ssl, time, urllib.request
+              ctx = ssl._create_unverified_context()
+              while True:
+                  try:
+                      urllib.request.urlopen("https://api-tls.demo.svc:8443/", timeout=2, context=ctx).read()
+                  except Exception:
+                      pass
+                  time.sleep(1)
+---
+# Cleartext gRPC (not OpenSSL). Dest join is the same ClusterIP → Service name path.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-grpc
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: api-grpc }
+  template:
+    metadata:
+      labels: { app: api-grpc }
+    spec:
+      containers:
+        - name: grpcbin
+          image: moul/grpcbin:latest
+          ports:
+            - containerPort: 9000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-grpc
+  namespace: demo
+spec:
+  selector: { app: api-grpc }
+  ports:
+    - port: 9000
+      targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-grpc
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: frontend-grpc }
+  template:
+    metadata:
+      labels: { app: frontend-grpc }
+    spec:
+      containers:
+        - name: grpcurl
+          image: fullstorydev/grpcurl:latest
+          command: ["sh", "-c"]
+          args:
+            - |
+              while true; do
+                grpcurl -plaintext api-grpc.demo.svc:9000 hello.HelloService/SayHello || true
+                sleep 1
+              done

@@ -44,7 +44,11 @@ grep -q listening /tmp/obs-https-server.log || {
 OBSAGENT_HEADLESS=1 OBSAGENT_SMOKE_PROBE=1 RUST_LOG=warn timeout --signal=INT 25 \
   "${PRIV[@]}" env OBSAGENT_HEADLESS=1 OBSAGENT_SMOKE_PROBE=1 RUST_LOG=warn "$BIN" >"$LOG" 2>&1 &
 runner=$!
-sleep 3
+for i in $(seq 1 40); do
+  grep -q "obsagent ready" "$LOG" 2>/dev/null && break
+  sleep 0.25
+done
+grep -q "obsagent ready" "$LOG" || { echo "FAIL: agent did not become ready"; cat "$LOG"; exit 1; }
 
 [ "$(loaded_named exit_ssl_write_ex)" -ge 1 ] || {
   echo "FAIL: exit_ssl_write_ex not loaded (Q15 / OpenSSL 3)"; cat "$LOG"; exit 1;

@@ -1,0 +1,12 @@
+syntax = "proto3";
+package slow;
+
+service Slow {
+  rpc Sleep (SleepRequest) returns (SleepReply);
+}
+
+message SleepRequest {
+  uint64 delay_ms = 1;
+}
+
+message SleepReply {}

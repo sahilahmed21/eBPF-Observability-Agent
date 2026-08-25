@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["agent", "common", "ebpf", "testdata/latency-server", "testdata/http-probe"]
+members = ["agent", "common", "ebpf", "testdata/latency-server", "testdata/http-probe", "testdata/writev-server", "testdata/grpc-slow"]
 # `ebpf` is excluded from the defaults: it only builds for bpfel-unknown-none, never the host.
 # `cargo build --workspace` would try to build it for the host and fail.
 default-members = ["agent", "common"]

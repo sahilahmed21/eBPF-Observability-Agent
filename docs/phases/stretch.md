@@ -1,14 +1,10 @@
 # Stretch goals
 
-Only after Phase 4 is solid.
+**Superseded by [VISION-95.md](VISION-95.md).**
 
-## S1 — gRPC / HTTP/2
+| Old stretch | Now |
+|---|---|
+| S1 HTTP/2 + gRPC | **Phase 7** — [phase-7-implementation-plan.md](phase-7-implementation-plan.md) |
+| S2 CPU profiles | **Phase 12** — [phase-12-implementation-plan.md](phase-12-implementation-plan.md) |
 
-- Parse 9-byte HTTP/2 frame header; demux by stream ID.
-- gRPC: 5-byte length prefix inside DATA; method from `:path` (`/package.Service/Method`).
-- Hand-roll frame parse preferred over pulling full `h2` (interview clarity).
-
-## S2 — Continuous CPU profiling
-
-- `perf_event` sampling (~99 Hz); symbolize (`blazesym`).
-- Merge stack samples with slow-request timestamps on same PID.
+These are on the critical path to the original resume sentence. Residual 5% (Go TLS, rustls, XDP, io_uring, full HPACK, multi-cluster) stays out — VISION-95 §0.

@@ -6,6 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use crate::correlate::PeerAddr;
 use crate::http::HttpEndpoint;
 use crate::identity::NodeId;
 use hdrhistogram::Histogram;
@@ -185,9 +186,19 @@ impl EdgeStats {
 ///
 /// `daddr_be` holds raw `sin_addr.s_addr` bytes (same convention as `agg.rs`).
 pub fn format_ip_port(daddr_be: u32, dport_be: u16) -> String {
-    let ip = std::net::Ipv4Addr::from(daddr_be.to_ne_bytes());
-    let port = u16::from_be(dport_be);
-    format!("{ip}:{port}")
+    format_peer(&PeerAddr::from_v4(daddr_be, dport_be))
+}
+
+pub fn format_peer(peer: &PeerAddr) -> String {
+    let port = u16::from_be(peer.dport_be);
+    if peer.is_v6() {
+        let ip = std::net::Ipv6Addr::from(peer.daddr);
+        format!("[{ip}]:{port}")
+    } else {
+        let raw = peer.v4_addr().unwrap_or(0);
+        let ip = std::net::Ipv4Addr::from(raw.to_ne_bytes());
+        format!("{ip}:{port}")
+    }
 }
 
 #[cfg(test)]
@@ -204,10 +215,7 @@ mod tests {
             dst: DstId::IpPort {
                 addr: "10.0.0.1:80".into(),
             },
-            endpoint: HttpEndpoint {
-                method: "GET".into(),
-                path: "/".into(),
-            },
+            endpoint: HttpEndpoint::http("GET", "/"),
             latency_ns: 50_000_000,
             status: 200,
         };
@@ -227,6 +235,18 @@ mod tests {
     }
 
     #[test]
+    fn format_v6_loopback() {
+        let mut addr = [0u8; 16];
+        addr[15] = 1;
+        let peer = PeerAddr {
+            family: obsagent_common::AF_INET6 as u8,
+            dport_be: u16::to_be(443),
+            daddr: addr,
+        };
+        assert_eq!(format_peer(&peer), "[::1]:443");
+    }
+
+    #[test]
     fn overflow_bucket() {
         let mut m = ServiceMap::default();
         let now = Instant::now();
@@ -242,10 +262,7 @@ mod tests {
                 dst: DstId::IpPort {
                     addr: format!("10.0.0.1:{i}"),
                 },
-                endpoint: HttpEndpoint {
-                    method: "GET".into(),
-                    path: "/".into(),
-                },
+                endpoint: HttpEndpoint::http("GET", "/"),
                 latency_ns: 1,
                 status: 200,
             };

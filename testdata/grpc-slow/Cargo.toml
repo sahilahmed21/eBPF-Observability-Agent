@@ -1,0 +1,27 @@
+[package]
+name = "grpc-slow"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "grpc_slow"
+path = "src/lib.rs"
+
+[[bin]]
+name = "grpc-slow"
+path = "src/main.rs"
+
+[[bin]]
+name = "grpc-probe"
+path = "src/probe.rs"
+
+[dependencies]
+prost = "0.13"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.12"

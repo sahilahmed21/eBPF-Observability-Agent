@@ -1,0 +1,144 @@
+rc=124 stage=load
+
+[DEBUG aya_obj::relocation] relocating program `enter_ssl_write` function `_RNvCs57rxnwnBDlA_6probes16try_enter_ssl_io` size 81
+[DEBUG aya_obj::relocation] relocating program `enter_ssl_write` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io` size 102
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_write` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io`
+[DEBUG aya_obj::relocation] relocating program `enter_ssl_write` function `memset` size 8
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_write` function `memset`
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_write` function `_RNvCs57rxnwnBDlA_6probes16try_enter_ssl_io`
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_write` function `enter_ssl_write`
+[DEBUG aya_obj::relocation] relocating program `enter_sendmsg` function `enter_sendmsg` size 7
+[DEBUG aya_obj::relocation] relocating program `enter_sendmsg` function `_RNvCs57rxnwnBDlA_6probes16try_enter_msghdr` size 54
+[DEBUG aya_obj::relocation] relocating program `enter_sendmsg` function `_RNvCs57rxnwnBDlA_6probes16stash_pending_io` size 128
+[DEBUG aya_obj::relocation] relocating program `enter_sendmsg` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io` size 102
+[DEBUG aya_obj::relocation] finished relocating program `enter_sendmsg` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io`
+[DEBUG aya_obj::relocation] finished relocating program `enter_sendmsg` function `_RNvCs57rxnwnBDlA_6probes16stash_pending_io`
+[DEBUG aya_obj::relocation] finished relocating program `enter_sendmsg` function `_RNvCs57rxnwnBDlA_6probes16try_enter_msghdr`
+[DEBUG aya_obj::relocation] finished relocating program `enter_sendmsg` function `enter_sendmsg`
+[DEBUG aya_obj::relocation] relocating program `exit_readv` function `exit_readv` size 6
+[DEBUG aya_obj::relocation] relocating program `exit_readv` function `_RNvCs57rxnwnBDlA_6probes11try_exit_io` size 98
+[DEBUG aya_obj::relocation] relocating program `exit_readv` function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind` size 244
+[DEBUG aya_obj::relocation] relocating program `exit_readv` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io` size 102
+[DEBUG aya_obj::relocation] finished relocating program `exit_readv` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io`
+[DEBUG aya_obj::relocation] relocating program `exit_readv` function `memset` size 8
+[DEBUG aya_obj::relocation] finished relocating program `exit_readv` function `memset`
+[DEBUG aya_obj::relocation] relocating program `exit_readv` function `memcmp` size 16
+[DEBUG aya_obj::relocation] finished relocating program `exit_readv` function `memcmp`
+[DEBUG aya_obj::relocation] relocating program `exit_readv` function `memmove` size 25
+[DEBUG aya_obj::relocation] finished relocating program `exit_readv` function `memmove`
+[DEBUG aya_obj::relocation] finished relocating program `exit_readv` function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind`
+[DEBUG aya_obj::relocation] finished relocating program `exit_readv` function `_RNvCs57rxnwnBDlA_6probes11try_exit_io`
+[DEBUG aya_obj::relocation] finished relocating program `exit_readv` function `exit_readv`
+[DEBUG aya_obj::relocation] relocating program `enter_ssl_do_handshake` function `enter_ssl_do_handshake` size 60
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_do_handshake` function `enter_ssl_do_handshake`
+[DEBUG aya_obj::relocation] relocating program `exit_recvmsg` function `exit_recvmsg` size 6
+[DEBUG aya_obj::relocation] relocating program `exit_recvmsg` function `_RNvCs57rxnwnBDlA_6probes11try_exit_io` size 98
+[DEBUG aya_obj::relocation] relocating program `exit_recvmsg` function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind` size 244
+[DEBUG aya_obj::relocation] relocating program `exit_recvmsg` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io` size 102
+[DEBUG aya_obj::relocation] finished relocating program `exit_recvmsg` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io`
+[DEBUG aya_obj::relocation] relocating program `exit_recvmsg` function `memset` size 8
+[DEBUG aya_obj::relocation] finished relocating program `exit_recvmsg` function `memset`
+[DEBUG aya_obj::relocation] relocating program `exit_recvmsg` function `memcmp` size 16
+[DEBUG aya_obj::relocation] finished relocating program `exit_recvmsg` function `memcmp`
+[DEBUG aya_obj::relocation] relocating program `exit_recvmsg` function `memmove` size 25
+[DEBUG aya_obj::relocation] finished relocating program `exit_recvmsg` function `memmove`
+[DEBUG aya_obj::relocation] finished relocating program `exit_recvmsg` function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind`
+[DEBUG aya_obj::relocation] finished relocating program `exit_recvmsg` function `_RNvCs57rxnwnBDlA_6probes11try_exit_io`
+[DEBUG aya_obj::relocation] finished relocating program `exit_recvmsg` function `exit_recvmsg`
+[DEBUG aya_obj::relocation] relocating program `exit_read` function `exit_read` size 6
+[DEBUG aya_obj::relocation] relocating program `exit_read` function `_RNvCs57rxnwnBDlA_6probes11try_exit_io` size 98
+[DEBUG aya_obj::relocation] relocating program `exit_read` function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind` size 244
+[DEBUG aya_obj::relocation] relocating program `exit_read` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io` size 102
+[DEBUG aya_obj::relocation] finished relocating program `exit_read` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io`
+[DEBUG aya_obj::relocation] relocating program `exit_read` function `memset` size 8
+[DEBUG aya_obj::relocation] finished relocating program `exit_read` function `memset`
+[DEBUG aya_obj::relocation] relocating program `exit_read` function `memcmp` size 16
+[DEBUG aya_obj::relocation] finished relocating program `exit_read` function `memcmp`
+[DEBUG aya_obj::relocation] relocating program `exit_read` function `memmove` size 25
+[DEBUG aya_obj::relocation] finished relocating program `exit_read` function `memmove`
+[DEBUG aya_obj::relocation] finished relocating program `exit_read` function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind`
+[DEBUG aya_obj::relocation] finished relocating program `exit_read` function `_RNvCs57rxnwnBDlA_6probes11try_exit_io`
+[DEBUG aya_obj::relocation] finished relocating program `exit_read` function `exit_read`
+[DEBUG aya_obj::relocation] relocating program `enter_ssl_read_ex` function `enter_ssl_read_ex` size 7
+[DEBUG aya_obj::relocation] relocating program `enter_ssl_read_ex` function `_RNvCs57rxnwnBDlA_6probes19try_enter_ssl_io_ex` size 81
+[DEBUG aya_obj::relocation] relocating program `enter_ssl_read_ex` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io` size 102
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_read_ex` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io`
+[DEBUG aya_obj::relocation] relocating program `enter_ssl_read_ex` function `memset` size 8
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_read_ex` function `memset`
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_read_ex` function `_RNvCs57rxnwnBDlA_6probes19try_enter_ssl_io_ex`
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_read_ex` function `enter_ssl_read_ex`
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `exit_ssl_read` size 65
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind` size 244
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io` size 102
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io`
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `memset` size 8
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `memset`
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `memcmp` size 16
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `memcmp`
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `memmove` size 25
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `memmove`
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind`
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `exit_ssl_read`
+[INFO  obsagent] OBSAGENT_PROFILE=1: perf_event ~99 Hz per CPU (STACKS RingBuf)
+
+FULL_TAIL:
+[DEBUG aya_obj::relocation] relocating program `enter_ssl_read_ex` function `memset` size 8
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_read_ex` function `memset`
+[DEBUG aya_obj::relocation] callee `memset` is at ins 190, 122 from current instruction 67
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_read_ex` function `_RNvCs57rxnwnBDlA_6probes19try_enter_ssl_io_ex`
+[DEBUG aya_obj::relocation] callee `_RNvCs57rxnwnBDlA_6probes19try_enter_ssl_io_ex` is at ins 7, 2 from current instruction 4
+[DEBUG aya_obj::relocation] finished relocating program `enter_ssl_read_ex` function `enter_ssl_read_ex`
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `exit_ssl_read` size 65
+[DEBUG aya_obj::relocation] relocating call to callee address 0x1410 in section 2 (relocation) at instruction 53
+[DEBUG aya_obj::relocation] callee is `_RNvCs57rxnwnBDlA_6probes12emit_io_kind`
+[DEBUG aya_obj::relocation] linked function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind` at instruction 65
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind` size 244
+[DEBUG aya_obj::relocation] relocating call to callee address 0x710 in section 2 (pc-relative) at instruction 83
+[DEBUG aya_obj::relocation] callee is `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io`
+[DEBUG aya_obj::relocation] linked function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io` at instruction 309
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io` size 102
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io`
+[DEBUG aya_obj::relocation] callee `_RNvCs57rxnwnBDlA_6probes19existing_fd_keep_io` is at ins 309, 225 from current instruction 83
+[DEBUG aya_obj::relocation] relocating call to callee address 0x1cd0 in section 2 (relocation) at instruction 130
+[DEBUG aya_obj::relocation] callee is `memset`
+[DEBUG aya_obj::relocation] linked function `memset` at instruction 411
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `memset` size 8
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `memset`
+[DEBUG aya_obj::relocation] callee `memset` is at ins 411, 280 from current instruction 130
+[DEBUG aya_obj::relocation] relocating call to callee address 0x1d10 in section 2 (relocation) at instruction 167
+[DEBUG aya_obj::relocation] callee is `memcmp`
+[DEBUG aya_obj::relocation] linked function `memcmp` at instruction 419
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `memcmp` size 16
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `memcmp`
+[DEBUG aya_obj::relocation] callee `memcmp` is at ins 419, 251 from current instruction 167
+[DEBUG aya_obj::relocation] relocating call to callee address 0x1d10 in section 2 (relocation) at instruction 186
+[DEBUG aya_obj::relocation] callee is `memcmp`
+[DEBUG aya_obj::relocation] callee `memcmp` is at ins 419, 232 from current instruction 186
+[DEBUG aya_obj::relocation] relocating call to callee address 0x1d10 in section 2 (relocation) at instruction 196
+[DEBUG aya_obj::relocation] callee is `memcmp`
+[DEBUG aya_obj::relocation] callee `memcmp` is at ins 419, 222 from current instruction 196
+[DEBUG aya_obj::relocation] relocating call to callee address 0x1d10 in section 2 (relocation) at instruction 205
+[DEBUG aya_obj::relocation] callee is `memcmp`
+[DEBUG aya_obj::relocation] callee `memcmp` is at ins 419, 213 from current instruction 205
+[DEBUG aya_obj::relocation] relocating call to callee address 0x1d10 in section 2 (relocation) at instruction 227
+[DEBUG aya_obj::relocation] callee is `memcmp`
+[DEBUG aya_obj::relocation] callee `memcmp` is at ins 419, 191 from current instruction 227
+[DEBUG aya_obj::relocation] relocating call to callee address 0x1d10 in section 2 (relocation) at instruction 235
+[DEBUG aya_obj::relocation] callee is `memcmp`
+[DEBUG aya_obj::relocation] callee `memcmp` is at ins 419, 183 from current instruction 235
+[DEBUG aya_obj::relocation] relocating call to callee address 0x1c08 in section 2 (relocation) at instruction 275
+[DEBUG aya_obj::relocation] callee is `memmove`
+[DEBUG aya_obj::relocation] linked function `memmove` at instruction 435
+[DEBUG aya_obj::relocation] relocating program `exit_ssl_read` function `memmove` size 25
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `memmove`
+[DEBUG aya_obj::relocation] callee `memmove` is at ins 435, 159 from current instruction 275
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `_RNvCs57rxnwnBDlA_6probes12emit_io_kind`
+[DEBUG aya_obj::relocation] callee `_RNvCs57rxnwnBDlA_6probes12emit_io_kind` is at ins 65, 11 from current instruction 53
+[DEBUG aya_obj::relocation] finished relocating program `exit_ssl_read` function `exit_ssl_read`
+[INFO  obsagent] attached SSL_do_handshake in /lib/x86_64-linux-gnu/libssl.so.3
+[INFO  obsagent] attached OpenSSL uprobes to /lib/x86_64-linux-gnu/libssl.so.3 (classic + 4/4 _ex)
+[INFO  obsagent] OBSAGENT_PROFILE=1: perf_event ~99 Hz per CPU (STACKS RingBuf)
+[INFO  obsagent::cgroup_index] cgroup index: initial entries=42 root=/sys/fs/cgroup
+[INFO  obsagent::cgroup_index] cgroup index: entries=42
+[INFO  obsagent] Phase 7 agent running (h2/gRPC + HTTP/1.1). q quit, t toggle view.
+[INFO  obsagent] Phase 12 CPU profiles enabled (join on spans >= 20 ms)

@@ -1,4 +1,4 @@
-# Minimal OTLP collector for kind/demo (receives agent metrics).
+# Minimal OTLP collector for kind/demo (receives agent metrics and traces).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,11 +16,16 @@ data:
         loglevel: info
       prometheus:
         endpoint: 0.0.0.0:8889
+        # Name contract with deploy/grafana/dashboards/obsagent.json:
+        # unit "ms" → _milliseconds; monotonic sums → _total (collector 0.96 defaults).
     service:
       pipelines:
         metrics:
           receivers: [otlp]
           exporters: [logging, prometheus]
+        traces:
+          receivers: [otlp]
+          exporters: [logging]
 ---
 apiVersion: apps/v1
 kind: Deployment

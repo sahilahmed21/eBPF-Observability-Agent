@@ -19,7 +19,10 @@ case "${1:-}" in
     bash /tmp/obs-preflight.sh
     ;;
   build)
-    cargo build --release
+    # default-members are only agent+common; gates need testdata bins too.
+    cargo build --release \
+      -p obsagent -p obsagent-common \
+      -p latency-server -p http-probe -p writev-server -p grpc-slow
     ;;
   test-common)
     # .cargo/config.toml sets runner=sudo -E (for agent load). Unit tests must not use it.
@@ -57,8 +60,63 @@ case "${1:-}" in
     strip scripts/smoke-milestone5.sh /tmp/obs-smoke4.sh
     bash /tmp/obs-smoke4.sh
     ;;
+  smoke6)
+    strip scripts/smoke-milestone6.sh /tmp/obs-smoke6.sh
+    bash /tmp/obs-smoke6.sh
+    ;;
+  correctness6)
+    strip scripts/correctness-phase6.sh /tmp/obs-correctness6.sh
+    bash /tmp/obs-correctness6.sh
+    ;;
+  smoke7)
+    strip scripts/smoke-milestone7.sh /tmp/obs-smoke7.sh
+    bash /tmp/obs-smoke7.sh
+    ;;
+  correctness7-grpc)
+    strip scripts/correctness-phase7-grpc.sh /tmp/obs-correctness7-grpc.sh
+    bash /tmp/obs-correctness7-grpc.sh
+    ;;
+  correctness7-h2-tls)
+    strip scripts/correctness-phase7-h2-tls.sh /tmp/obs-correctness7-h2-tls.sh
+    bash /tmp/obs-correctness7-h2-tls.sh
+    ;;
+  correctness8-dual)
+    strip scripts/correctness-phase8-dual.sh /tmp/obs-correctness8-dual.sh
+    bash /tmp/obs-correctness8-dual.sh
+    ;;
+  correctness12)
+    strip scripts/correctness-phase12.sh /tmp/obs-correctness12.sh
+    bash /tmp/obs-correctness12.sh
+    ;;
+  smoke9)
+    strip scripts/smoke-milestone9.sh /tmp/obs-smoke9.sh
+    bash /tmp/obs-smoke9.sh
+    ;;
+  pid-ns)
+    strip scripts/check-pid-ns.sh /tmp/obs-pid-ns.sh
+    bash /tmp/obs-pid-ns.sh
+    ;;
+  k3s-e2e)
+    strip scripts/e2e-k3s.sh /tmp/obs-e2e-k3s.sh
+    # Soft skip only when ALLOW_SKIP=1; otherwise missing cluster is FAIL.
+    # Script is copied to /tmp — must not derive ROOT from BASH_SOURCE.
+    OBSAGENT_ROOT="${OBSAGENT_ROOT:-/mnt/c/projects/eBPF-Observability-Agent}" \
+      bash /tmp/obs-e2e-k3s.sh
+    ;;
+  overhead6)
+    strip scripts/overhead-phase6.sh /tmp/obs-overhead6.sh
+    bash /tmp/obs-overhead6.sh
+    ;;
+  overhead-vision95)
+    strip scripts/overhead-vision95.sh /tmp/obs-overhead-vision95.sh
+    bash /tmp/obs-overhead-vision95.sh
+    ;;
+  overload-vision95)
+    strip scripts/overload-vision95.sh /tmp/obs-overload-vision95.sh
+    bash /tmp/obs-overload-vision95.sh
+    ;;
   *)
-    echo "usage: $0 {preflight|build|test-common|test-agent|smoke0|smoke1|smoke2|smoke3|smoke4|correctness2|correctness3}" >&2
+    echo "usage: $0 {preflight|build|test-common|test-agent|smoke0|smoke1|smoke2|smoke3|smoke4|smoke6|smoke7|smoke9|correctness2|correctness3|correctness6|correctness7-grpc|correctness7-h2-tls|correctness8-dual|correctness12|overhead6|overhead-vision95|overload-vision95|pid-ns|k3s-e2e}" >&2
     exit 2
     ;;
 esac
