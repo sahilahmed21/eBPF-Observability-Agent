@@ -58,7 +58,7 @@ Measured on WSL2 (kernel 6.6), loopback, no k3s. Reproduce with the scripts name
 | Replayable pipeline | `obsagent replay <file>` over a real capture, `tests/fixtures/slow-50ms.evlog` (no root) | 15 exchanges, p50 50.5 ms; live agent on the same run: 15, 50.5 ms; 20 replays identical |
 | Record with redaction | `OBSAGENT_RECORD=<path>` (mode 0600) | `authorization`, `cookie`, `x-api-key` header values overwritten before write; HTTP/2 header blocks are **not** redacted |
 | Loss behaviour | unit test over replay: drop 0/10/50% of records | exchanges recovered = exchanges whose request and response records both survive |
-| Streamed LLM calls (SSE, HTTP/1.1) | `scripts/correctness-llm.sh`, 30 calls vs client-side timing | worst error: TTFB 0.14%, total 0.05%; token counts exact |
+| Streamed LLM calls (SSE, HTTP/1.1) | `scripts/correctness-llm.sh`, 30 calls vs client-side timing | worst error: TTFB 0.14%, total 0.05%; token counts exact; exported as OTLP `chat` client spans with `gen_ai.usage.*_tokens` (unit-tested, not yet checked against a live collector) |
 | Policy audit (detection only) | `scripts/correctness-policy.sh`, `OBSAGENT_FILEOPS=1 OBSAGENT_POLICY=<rules>` | 5/5 canary violations detected, 0 unexpected, 5 benign scenarios |
 | Unit tests | `./scripts/wsl-run.sh test-common` and `test-agent` | 22 + 188 pass |
 
