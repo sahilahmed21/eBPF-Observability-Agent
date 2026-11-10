@@ -39,13 +39,15 @@ Executed with `perf stat -p <agent>` (15 s window), `perf record -F 999`, and `k
 
 **k3s node, HTTP only.** Agent on the k3s node (WSL2) with `OBSAGENT_K8S=1`, OTLP off, vegeta 500 rps / 30 s to the `api` ClusterIP, `perf stat -p`: idle ~0.7% of one core, under load ~10.6%. This matches the plain-WSL2 HTTP number (~9.8%), so the k3s node and the K8S default deny-list do not explain the August ~87%. What this run did not include, and August did: 200 rps gRPC (`frontend-grpc` is in CrashLoopBackOff on this cluster), OTLP export to the collector, `WORKERS=32`. The gap remains unexplained; the remaining suspects are gRPC/HTTP/2 decode cost and OTLP export under load.
 
-**`OBSAGENT_FILEOPS` (openat/execve probes) is expensive on open-heavy workloads.** Worst-case load: 4 processes x 300 000 `open()`+`close()` each (about 1.2 M opens in ~1 s), plain WSL2, agent with `OBSAGENT_K8S=0`, single run each:
+**`OBSAGENT_FILEOPS` (openat/execve probes) is expensive on open-heavy workloads.** Worst-case load: 4 processes x 300 000 `open()`+`close()` each (about 1.2 M opens in ~1 s), plain WSL2, agent with `OBSAGENT_K8S=0`, three runs each:
 
-| Configuration | Slowest process wall time | Agent CPU over a 20 s window |
+| Configuration | Slowest process wall time (3 runs) | Agent CPU over a 20 s window (3 runs) |
 |---|---|---|
-| no agent | 0.94 s | n/a |
-| agent, probes off | 1.09 s | ~0.13 s (~0.7%) |
-| agent, `OBSAGENT_FILEOPS=1` | 1.65 s | ~1.13 s (~5.7%) |
+| no agent | 0.94, 0.89, 0.89 s | n/a |
+| agent, probes off (`OBSAGENT_FILEOPS` unset or `0`) | 1.15, 1.14, 1.11 s | 0.13-0.14 s (~0.7%) |
+| agent, `OBSAGENT_FILEOPS=1` | 1.65, 1.64, 1.60 s | 1.02-1.10 s (~5.1-5.5%) |
+
+The probes make this loop about 44% slower than the agent without them (1.63 s vs 1.13 s mean) and about 80% slower than no agent. A preflight check before every run looked for leftover `obsagent` and load-generator processes; it found a still-exiting `obsagent` from the previous run at the start of 4 of the 9 runs (the agent takes more than 1 s to exit after `SIGINT`) and killed it before measuring.
 
 `bpf_stats` for `enter_openat`: 2.15 s over 1.22 M calls, about 1.76 us per `open`; `enter_execve` is negligible at these counts. Every open emits one RingBuf record, so the agent also pays to drain and policy-check each one. This is a deliberately open-heavy loop, not a typical service, but it shows the probes should be scoped (`OBSAGENT_COMM_ALLOW`) rather than run node-wide. `OBSAGENT_FILEOPS=0` now means off (before, any set value attached the probes).
 
