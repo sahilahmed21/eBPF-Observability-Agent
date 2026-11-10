@@ -17,7 +17,7 @@ Validated on **WSL2 + k3s** (claim lock **10/10**, 2026-08-25):
 | Dual-plane TLS | Content latency + wire timing join; handshake via `SSL_do_handshake` |
 | Service map | Named edge **`demo/frontend` → `demo/api`** on a real node |
 | OTLP + Grafana | Metrics + sampled traces scraped end-to-end |
-| Overhead (pin load) | HTTP **500/s** + gRPC **~200/s**, 60s × 3 → **~87% of one core** (`perf stat`) |
+| Overhead (pin load) | HTTP **500/s** + gRPC **~200/s** on WSL2 + k3s → agent **~11–23%** of one core plus **~8–17%** in-kernel BPF time (2026-11 re-measurement; the August ~87% was **retracted**, see `docs/overhead.md`) |
 | Overload | RingBuf drops visible; sticky sampling engages (`sample_n=2`); RSS stable |
 | CPU profiles | Optional join of stacks onto slow spans (`OBSAGENT_PROFILE=1`) |
 
@@ -70,11 +70,12 @@ Scope notes: LLM capture needs the TLS plaintext path (OpenSSL), HTTP/1.1 chunke
 
 ## Limitations
 
-- **Overhead is high and environment-dependent.** ~87% of one core (agent process only, `perf stat -p`) at 500 HTTP + ~200 gRPC rps on WSL2 + k3s; a 2026-11 re-measurement on plain WSL2 loopback gave ~14–21% for the same load, and in-kernel BPF time (~16 µs per `write`) is additional and not in either number. The k3s gap is not yet explained. Details: [`docs/overhead.md`](docs/overhead.md).
+- **Overhead is environment-dependent and not yet characterised on a production-like node.** On a WSL2 k3s node at 500 HTTP + 200 gRPC rps the agent used ~11–23% of one core (1–2 runs per config, drops in some) and in-kernel BPF time added ~8–17% on the applications' CPUs. An August figure of ~87% could not be reproduced and is retracted. Details and what was not tested: [`docs/overhead.md`](docs/overhead.md).
 - **Latency ends at response headers**, so a streamed response is measured to its headers, not its last byte.
 - **Capture is a 256 B prefix** of the first iovec per syscall; no `io_uring` or `sendfile` probes.
 - **OpenSSL only.** No Go `crypto/tls` or rustls. OpenTelemetry's eBPF Instrumentation (OBI) covers more TLS stacks and protocols; this project is a learning-grade agent, not a replacement for it.
 - **No trace propagation.** Each exchange is a root span; the service map shows edges but spans are not parent/child linked.
+- **Events are lost under ring-buffer drops, and so are LLM calls.** In one `scripts/correctness-llm.sh` run with OTLP on, on a busy k3s node, the agent saw 13 of 30 streamed calls. Its own counters showed why: `drops=3765` from start-up, `SAMPLE_N 1 -> 2 (drops_delta=3765)`, `sample_n=2`; a call whose request or response events are dropped or sampled out is never reconstructed. Three later runs on the same host saw 30 of 30 (their drop counters were not recorded). The agent reports the loss (`drops=`, `sample_n=` in its status line) but does not recover the missing calls; treat per-call counts as a lower bound whenever `drops` is non-zero.
 - **Tested on one kernel** (WSL2 6.6). Unit tests run in CI; the correctness gates need root and a BPF-capable host.
 
 ---

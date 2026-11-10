@@ -35,10 +35,17 @@ impl Policy {
                 continue;
             }
             let bad = |why: &str| format!("policy line {}: {why}: {line:?}", i + 1);
-            match line.split_once(char::is_whitespace).map(|(k, v)| (k, v.trim())) {
-                Some(("deny_open", v)) if v.starts_with('/') => p.deny_open.push(v.trim_end_matches('/').to_string()),
+            match line
+                .split_once(char::is_whitespace)
+                .map(|(k, v)| (k, v.trim()))
+            {
+                Some(("deny_open", v)) if v.starts_with('/') => {
+                    p.deny_open.push(v.trim_end_matches('/').to_string())
+                }
                 Some(("deny_open", _)) => return Err(bad("deny_open needs an absolute path")),
-                Some(("deny_exec", v)) if !v.is_empty() && !v.contains('/') => p.deny_exec.push(v.to_string()),
+                Some(("deny_exec", v)) if !v.is_empty() && !v.contains('/') => {
+                    p.deny_exec.push(v.to_string())
+                }
                 Some(("deny_exec", _)) => return Err(bad("deny_exec needs a bare basename")),
                 _ => return Err(bad("unknown rule")),
             }
@@ -51,14 +58,24 @@ impl Policy {
             Op::Open => self
                 .deny_open
                 .iter()
-                .find(|d| path.strip_prefix(d.as_str()).is_some_and(|r| r.is_empty() || r.starts_with('/')))
+                .find(|d| {
+                    path.strip_prefix(d.as_str())
+                        .is_some_and(|r| r.is_empty() || r.starts_with('/'))
+                })
                 .map(|d| format!("deny_open {d}")),
             Op::Exec => {
                 let base = path.rsplit('/').next().unwrap_or(path);
-                self.deny_exec.iter().find(|d| d.as_str() == base).map(|d| format!("deny_exec {d}"))
+                self.deny_exec
+                    .iter()
+                    .find(|d| d.as_str() == base)
+                    .map(|d| format!("deny_exec {d}"))
             }
         }?;
-        Some(Violation { op, path: path.to_string(), rule })
+        Some(Violation {
+            op,
+            path: path.to_string(),
+            rule,
+        })
     }
 }
 
@@ -67,12 +84,17 @@ mod tests {
     use super::*;
 
     fn p() -> Policy {
-        Policy::parse("# rules\ndeny_open /home/agent/.ssh\ndeny_open /etc/shadow\ndeny_exec nc\n\n").unwrap()
+        Policy::parse(
+            "# rules\ndeny_open /home/agent/.ssh\ndeny_open /etc/shadow\ndeny_exec nc\n\n",
+        )
+        .unwrap()
     }
 
     #[test]
     fn open_under_denied_prefix_is_a_violation() {
-        let v = p().check(Op::Open, "/home/agent/.ssh/id_ed25519").expect("violation");
+        let v = p()
+            .check(Op::Open, "/home/agent/.ssh/id_ed25519")
+            .expect("violation");
         assert_eq!(v.rule, "deny_open /home/agent/.ssh");
         assert_eq!(v.path, "/home/agent/.ssh/id_ed25519");
         assert!(p().check(Op::Open, "/etc/shadow").is_some());
@@ -96,7 +118,9 @@ mod tests {
 
     #[test]
     fn benign_paths_pass() {
-        assert!(p().check(Op::Open, "/lib/x86_64-linux-gnu/libc.so.6").is_none());
+        assert!(p()
+            .check(Op::Open, "/lib/x86_64-linux-gnu/libc.so.6")
+            .is_none());
         assert!(p().check(Op::Exec, "/usr/bin/git").is_none());
     }
 

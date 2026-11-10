@@ -7,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 
-use obsagent_common::{EventKind, SOCK_IO_EVENT_SIZE, SOCK_IO_PREFIX_LEN, SockIoEvent};
+use obsagent_common::{EventKind, SockIoEvent, SOCK_IO_EVENT_SIZE, SOCK_IO_PREFIX_LEN};
 
 use crate::http::redact_headers;
 
@@ -50,7 +50,10 @@ pub fn read_all(mut r: impl Read) -> io::Result<Vec<Vec<u8>>> {
     let mut magic = [0u8; 8];
     r.read_exact(&mut magic)?;
     if &magic != MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "not an obsagent event log"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not an obsagent event log",
+        ));
     }
     let mut out = Vec::new();
     loop {
@@ -89,7 +92,10 @@ mod tests {
         };
         // SAFETY: SockIoEvent is repr(C) plain data; test-only byte view.
         unsafe {
-            core::slice::from_raw_parts((&ev as *const SockIoEvent).cast::<u8>(), SOCK_IO_EVENT_SIZE)
+            core::slice::from_raw_parts(
+                (&ev as *const SockIoEvent).cast::<u8>(),
+                SOCK_IO_EVENT_SIZE,
+            )
         }
         .to_vec()
     }
@@ -100,7 +106,13 @@ mod tests {
 
     #[test]
     fn roundtrip_preserves_records() {
-        let rec = io_bytes(EventKind::SockIo, IoDir::Write, 7, 5, b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n");
+        let rec = io_bytes(
+            EventKind::SockIo,
+            IoDir::Write,
+            7,
+            5,
+            b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n",
+        );
         let mut buf = Vec::new();
         let mut w = Writer::new(&mut buf).unwrap();
         w.write(&rec).unwrap();
@@ -119,7 +131,10 @@ mod tests {
             for secret in [&b"SECRET1"[..], b"SECRET2", b"SECRET3", b"SECRET4"] {
                 assert!(!contains(&buf, secret), "{kind:?} leaked {secret:?}");
             }
-            assert!(contains(&buf, b"POST /v1/messages"), "non-secret bytes kept");
+            assert!(
+                contains(&buf, b"POST /v1/messages"),
+                "non-secret bytes kept"
+            );
         }
     }
 

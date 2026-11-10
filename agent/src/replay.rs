@@ -13,6 +13,7 @@ use crate::http::{normalize_path, parse_exchange, HttpEndpoint, ParsedExchange};
 use crate::ingest::IngestState;
 use crate::llm::LlmCall;
 
+#[cfg(test)]
 pub fn replay(records: &[Vec<u8>]) -> Vec<ParsedExchange> {
     replay_full(records).0
 }
@@ -50,7 +51,10 @@ pub fn replay_full(records: &[Vec<u8>]) -> (Vec<ParsedExchange>, Vec<LlmCall>) {
             });
         }
     }
-    calls.extend(st.llm.evict_stale(last_now + TIMEOUT + Duration::from_secs(1)));
+    calls.extend(
+        st.llm
+            .evict_stale(last_now + TIMEOUT + Duration::from_secs(1)),
+    );
     (out, calls)
 }
 
@@ -76,8 +80,13 @@ mod tests {
             prefix,
         };
         // SAFETY: repr(C) plain data; test-only byte view.
-        unsafe { core::slice::from_raw_parts((&ev as *const SockIoEvent).cast::<u8>(), SOCK_IO_EVENT_SIZE) }
-            .to_vec()
+        unsafe {
+            core::slice::from_raw_parts(
+                (&ev as *const SockIoEvent).cast::<u8>(),
+                SOCK_IO_EVENT_SIZE,
+            )
+        }
+        .to_vec()
     }
 
     fn log(records: &[Vec<u8>]) -> Vec<Vec<u8>> {
@@ -145,7 +154,9 @@ mod tests {
         let bytes = include_bytes!("../../tests/fixtures/slow-50ms.evlog");
         let mut rows = replay(&read_all(&bytes[..]).unwrap());
         assert_eq!(rows.len(), 15);
-        assert!(rows.iter().all(|r| r.endpoint == HttpEndpoint::http("GET", "/slow") && r.status == 200));
+        assert!(rows
+            .iter()
+            .all(|r| r.endpoint == HttpEndpoint::http("GET", "/slow") && r.status == 200));
         rows.sort_by_key(|r| r.latency_ns);
         let p50_ms = rows[rows.len() / 2].latency_ns as f64 / 1e6;
         assert!((45.0..=56.0).contains(&p50_ms), "p50={p50_ms}ms");
@@ -182,7 +193,13 @@ mod tests {
 
     #[test]
     fn random_bytes_never_panic_the_pipeline() {
-        let seeds: [&[u8]; 5] = [b"GET / HTTP/1.1\r\n", b"HTTP/1.1 200", b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", b"\x00\x00\x05\x01\x04\x00\x00\x00\x01", b""];
+        let seeds: [&[u8]; 5] = [
+            b"GET / HTTP/1.1\r\n",
+            b"HTTP/1.1 200",
+            b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+            b"\x00\x00\x05\x01\x04\x00\x00\x00\x01",
+            b"",
+        ];
         let mut s = 0xDEAD_BEEF_CAFE_F00D_u64;
         let mut records = Vec::new();
         for i in 0..20_000u64 {
@@ -191,8 +208,16 @@ mod tests {
                 p.push(xs(&mut s) as u8);
             }
             p.truncate(SOCK_IO_PREFIX_LEN);
-            let kind = if xs(&mut s) % 2 == 0 { EventKind::SockIo } else { EventKind::TlsIo };
-            let dir = if xs(&mut s) % 2 == 0 { IoDir::Write } else { IoDir::Read };
+            let kind = if xs(&mut s).is_multiple_of(2) {
+                EventKind::SockIo
+            } else {
+                EventKind::TlsIo
+            };
+            let dir = if xs(&mut s).is_multiple_of(2) {
+                IoDir::Write
+            } else {
+                IoDir::Read
+            };
             records.push(rec(kind, dir, (xs(&mut s) % 8) as i32, i * 1_000, &p));
         }
         let _ = replay(&records);

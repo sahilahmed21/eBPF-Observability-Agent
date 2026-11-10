@@ -130,7 +130,12 @@ mod tests {
     fn http1_request_response_yields_exchange_and_inflight_clears() {
         let mut st = IngestState::default();
         let now = Instant::now();
-        let req = io(IoDir::Write, 7, 1_000, b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n");
+        let req = io(
+            IoDir::Write,
+            7,
+            1_000,
+            b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n",
+        );
         let resp = io(IoDir::Read, 7, 50_001_000, b"HTTP/1.1 200 OK\r\n\r\n");
 
         let a = st.ingest(req, now, false);
@@ -149,12 +154,20 @@ mod tests {
     fn split_request_headers_join_before_correlation() {
         let mut st = IngestState::default();
         let now = Instant::now();
-        let a = st.ingest(io(IoDir::Write, 7, 1_000, b"GET /slow HTTP/1.1\r\n"), now, false);
+        let a = st.ingest(
+            io(IoDir::Write, 7, 1_000, b"GET /slow HTTP/1.1\r\n"),
+            now,
+            false,
+        );
         assert!(!a.reassembled);
         assert!(a.clear_inflight.is_empty());
         let b = st.ingest(io(IoDir::Write, 7, 2_000, b"Host: x\r\n\r\n"), now, false);
         assert!(b.reassembled);
-        let c = st.ingest(io(IoDir::Read, 7, 9_000, b"HTTP/1.1 200 OK\r\n\r\n"), now, false);
+        let c = st.ingest(
+            io(IoDir::Read, 7, 9_000, b"HTTP/1.1 200 OK\r\n\r\n"),
+            now,
+            false,
+        );
         assert_eq!(c.exchange.expect("exchange").latency_ns(), 9_000 - 1_000);
     }
 
@@ -167,10 +180,22 @@ mod tests {
             e.kind = EventKind::TlsIo as u8;
             e
         };
-        let req = tls(IoDir::Write, 1_000, b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n");
-        let hdr = tls(IoDir::Read, 300_000_000, b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
+        let req = tls(
+            IoDir::Write,
+            1_000,
+            b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n",
+        );
+        let hdr = tls(
+            IoDir::Read,
+            300_000_000,
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n",
+        );
         let delta = tls(IoDir::Read, 800_000_000, b"4f\r\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":15}}\n\n");
-        let stop = tls(IoDir::Read, 900_000_000, b"2e\r\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        let stop = tls(
+            IoDir::Read,
+            900_000_000,
+            b"2e\r\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
 
         assert_eq!(st.ingest(req, now, true).clear_inflight, vec![(42, 9)]);
         let h = st.ingest(hdr, now, true);
@@ -189,7 +214,11 @@ mod tests {
     #[test]
     fn non_http_bytes_are_ignored() {
         let mut st = IngestState::default();
-        let out = st.ingest(io(IoDir::Write, 7, 1, b"\x16\x03\x01binary"), Instant::now(), false);
+        let out = st.ingest(
+            io(IoDir::Write, 7, 1, b"\x16\x03\x01binary"),
+            Instant::now(),
+            false,
+        );
         assert!(out.exchange.is_none() && out.h2.is_empty() && !out.reassembled);
     }
 }

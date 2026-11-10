@@ -96,7 +96,9 @@ impl LlmTracker {
         let text = String::from_utf8_lossy(&ev.prefix[..n]);
         s.at = now;
         s.call.total_ns = ev.ts_ns.saturating_sub(s.t_start_ns);
-        if let Some(v) = u64_after(&text, "input_tokens").or_else(|| u64_after(&text, "prompt_tokens")) {
+        if let Some(v) =
+            u64_after(&text, "input_tokens").or_else(|| u64_after(&text, "prompt_tokens"))
+        {
             s.call.input_tokens = Some(v);
         }
         // `message_start` carries a placeholder output_tokens; only deltas are cumulative totals.
@@ -154,12 +156,15 @@ fn header(buf: &[u8], name: &str) -> Option<String> {
     let text = String::from_utf8_lossy(buf);
     text.split("\r\n").skip(1).find_map(|l| {
         let (k, v) = l.split_once(':')?;
-        k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+        k.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| v.trim().to_string())
     })
 }
 
 fn is_sse(resp: &[u8]) -> bool {
-    header(resp, "content-type").is_some_and(|v| v.to_ascii_lowercase().contains("text/event-stream"))
+    header(resp, "content-type")
+        .is_some_and(|v| v.to_ascii_lowercase().contains("text/event-stream"))
 }
 
 /// First unsigned integer after `"key"` and its colon (spaces allowed).
@@ -181,7 +186,8 @@ mod tests {
     // Shapes taken from https://platform.claude.com/docs/en/build-with-claude/streaming (2026-11-03).
     const START: &[u8] = b"5a\r\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n\r\n";
     const DELTA: &[u8] = b"4f\r\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"output_tokens\":15}}\n\n\r\n";
-    const DELTA_NO_USAGE: &[u8] = b"3f\r\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{}}\n\n\r\n";
+    const DELTA_NO_USAGE: &[u8] =
+        b"3f\r\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{}}\n\n\r\n";
     const STOP: &[u8] = b"2e\r\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n\r\n";
 
     fn io(dir: IoDir, ts_ns: u64, payload: &[u8]) -> SockIoEvent {
@@ -224,13 +230,18 @@ mod tests {
         assert!(t.is_streaming(42, 9));
         assert!(t.chunk(&io(IoDir::Read, 500_000_000, START), now).is_none());
         assert!(t.chunk(&io(IoDir::Read, 900_000_000, DELTA), now).is_none());
-        let call = t.chunk(&io(IoDir::Read, 910_000_000, STOP), now).expect("finished");
+        let call = t
+            .chunk(&io(IoDir::Read, 910_000_000, STOP), now)
+            .expect("finished");
         assert_eq!(call.host, "api.anthropic.com");
         assert_eq!(call.path, "/v1/messages");
         assert_eq!(call.status, 200);
         assert_eq!(call.ttfb_ns, 400_000_000);
         assert_eq!(call.total_ns, 910_000_000 - 1_000);
-        assert_eq!((call.input_tokens, call.output_tokens), (Some(25), Some(15)));
+        assert_eq!(
+            (call.input_tokens, call.output_tokens),
+            (Some(25), Some(15))
+        );
         assert!(call.complete);
         assert!(!t.is_streaming(42, 9));
     }
@@ -250,7 +261,14 @@ mod tests {
         let mut t = LlmTracker::default();
         let now = Instant::now();
         t.start(&exchange(RESP_SSE), now);
-        t.chunk(&io(IoDir::Read, 2_000, b"x\r\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n"), now);
+        t.chunk(
+            &io(
+                IoDir::Read,
+                2_000,
+                b"x\r\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n",
+            ),
+            now,
+        );
         t.chunk(&io(IoDir::Read, 3_000, DELTA), now);
         let call = t.chunk(&io(IoDir::Read, 4_000, STOP), now).unwrap();
         assert_eq!(call.output_tokens, Some(15));
@@ -261,11 +279,17 @@ mod tests {
         let mut t = LlmTracker::default();
         let now = Instant::now();
         let mut ex = exchange(RESP_SSE);
-        ex.req_prefix = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n".to_vec();
+        ex.req_prefix =
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n".to_vec();
         assert!(t.start(&ex, now));
         t.chunk(&io(IoDir::Read, 2_000, b"9\r\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22}}\n\n"), now);
-        let call = t.chunk(&io(IoDir::Read, 3_000, b"e\r\ndata: [DONE]\n\n\r\n"), now).unwrap();
-        assert_eq!((call.input_tokens, call.output_tokens), (Some(11), Some(22)));
+        let call = t
+            .chunk(&io(IoDir::Read, 3_000, b"e\r\ndata: [DONE]\n\n\r\n"), now)
+            .unwrap();
+        assert_eq!(
+            (call.input_tokens, call.output_tokens),
+            (Some(11), Some(22))
+        );
         assert!(call.complete);
     }
 
@@ -273,7 +297,10 @@ mod tests {
     fn non_sse_or_non_llm_path_is_not_a_stream() {
         let mut t = LlmTracker::default();
         let now = Instant::now();
-        assert!(!t.start(&exchange(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n"), now));
+        assert!(!t.start(
+            &exchange(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n"),
+            now
+        ));
         let mut ex = exchange(RESP_SSE);
         ex.req_prefix = b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n".to_vec();
         assert!(!t.start(&ex, now));

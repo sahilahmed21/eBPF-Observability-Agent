@@ -31,9 +31,47 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(f"{len(b):x}\r\n".encode() + b + b"\r\n")
         self.wfile.flush()
 
+    def _openai(self, req: dict) -> None:
+        """OpenAI-style streaming (what the Atlas gateway's upstream client speaks).
+
+        Env knobs: OAI_HEADER_MS (delay before headers, 300), OAI_FIRST_TOKEN_MS (extra delay after
+        headers before the first content chunk, 0), OAI_GAP_MS (40), OAI_DELTAS (5).
+        prompt_tokens = len(request body) // 4 so rows differ; usage is sent only when
+        stream_options.include_usage is true, as the real API does.
+        """
+        env = os.environ.get
+        time.sleep(int(env("OAI_HEADER_MS", "300")) / 1000)
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream; charset=utf-8")
+        self.send_header("transfer-encoding", "chunked")
+        self.end_headers()
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        time.sleep(int(env("OAI_FIRST_TOKEN_MS", "0")) / 1000)
+        gap, deltas = int(env("OAI_GAP_MS", "40")) / 1000, int(env("OAI_DELTAS", "5"))
+        base = {"id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 1700000000, "model": "mock"}
+
+        def emit(obj: dict) -> None:
+            self._chunk(f"data: {json.dumps({**base, **obj}, separators=(',', ':'))}\n\n")
+
+        emit({"choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+        for i in range(deltas):
+            if i:
+                time.sleep(gap)
+            emit({"choices": [{"index": 0, "delta": {"content": f"w{i}"}}]})
+        time.sleep(gap)
+        emit({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+        if (req.get("stream_options") or {}).get("include_usage"):
+            pt = len(json.dumps(req)) // 4
+            emit({"choices": [], "usage": {"prompt_tokens": pt, "completion_tokens": deltas, "total_tokens": pt + deltas}})
+        self._chunk("data: [DONE]\n\n")
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
     def do_POST(self) -> None:
         n = int(self.headers.get("Content-Length", "0"))
         knobs = json.loads(self.rfile.read(n) or b"{}")
+        if self.path == "/v1/chat/completions":
+            return self._openai(knobs)
         ttft = knobs.get("ttft_ms", 300) / 1000
         gap = knobs.get("gap_ms", 40) / 1000
         deltas = knobs.get("deltas", 5)

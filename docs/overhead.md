@@ -10,7 +10,7 @@ Record the **same** load script every milestone (`benches/` once it exists).
 | 3 | 2026-08-10 | `scripts/overhead-phase3-quick.sh` (8 rounds × Python HTTPS probe 3 paths) | 3.5% (`ps` avg) | ~22.6 MiB | drops=0; tlsio under sample; sockio=0 on TLS fds (Q8). Quick burst only — not host-normalized &lt;2% proof. |
 | 4 | | | | | + map + OTLP |
 | 8 | 2026-08-19 | `correctness8-dual` (5× HTTPS `/slow` 50 ms) | not sampled (`ps`) | ~same | `socktimes=180` `tlsio=21` `join=100%` `hs_p50=2.93ms`. Extra RingBuf records vs M3. **Not** Vision-95 `&lt;2%`. |
-| 11 | 2026-08-25 | vegeta **500 RPS** HTTP/1.1 + ghz **200 RPS** gRPC, 60 s × 3; ClusterIP; `api`×3; WORKERS=32; `OBSAGENT_PROFILE=0`; WSL2 k3s | **mean ~87% of one core** (`perf -p`: 0.9 / 0.8 / 0.9 CPUs utilized) | — | Pin met (HTTP 500 @ 100%, gRPC ~200). Logs: `docs/handoff/artifacts/logs/overhead-run{1,2,3}.log`. **Not** &lt;2% — resume must say measured ~87% (or “near one core”). Footnote: eBPF probe time is on syscall CPUs, not this `perf -p`. |
+| 11 | 2026-08-25 | vegeta **500 RPS** HTTP/1.1 + ghz **200 RPS** gRPC, 60 s × 3; ClusterIP; `api`×3; WORKERS=32; `OBSAGENT_PROFILE=0`; WSL2 k3s | **~87% of one core (RETRACTED 2026-11-10: not reproduced, cause not found; see the ladder below)** (`perf -p`: 0.9 / 0.8 / 0.9 CPUs utilized) | — | Pin met (HTTP 500 @ 100%, gRPC ~200). Logs: `docs/handoff/artifacts/logs/overhead-run{1,2,3}.log`. **Not** &lt;2% — resume must say measured ~87% (or “near one core”). Footnote: eBPF probe time is on syscall CPUs, not this `perf -p`. |
 
 **Target:** &lt;2% CPU under documented load. If exceeded, note cause and next optimization (sampling, smaller prefix, fewer attach points).
 
@@ -48,3 +48,22 @@ Executed with `perf stat -p <agent>` (15 s window), `perf record -F 999`, and `k
 | agent, `OBSAGENT_FILEOPS=1` | 1.65 s | ~1.13 s (~5.7%) |
 
 `bpf_stats` for `enter_openat`: 2.15 s over 1.22 M calls, about 1.76 us per `open`; `enter_execve` is negligible at these counts. Every open emits one RingBuf record, so the agent also pays to drain and policy-check each one. This is a deliberately open-heavy loop, not a typical service, but it shows the probes should be scoped (`OBSAGENT_COMM_ALLOW`) rather than run node-wide. `OBSAGENT_FILEOPS=0` now means off (before, any set value attached the probes).
+
+## Retraction of the August ~87% (2026-11-10)
+
+The August figure (~87% of one core) is **retracted as a headline**. It could not be reproduced, and no named cause was found. What was measured instead, on the same WSL2 k3s node, agent on the node with `OBSAGENT_K8S=1`, vegeta 500 rps HTTP/1.1 to the `api` ClusterIP, 30 s windows, one or two runs per config:
+
+| Config (conditions added one at a time) | Agent CPU, % of one core | In-kernel BPF time, % of one core | Runs |
+|---|---|---|---|
+| A: HTTP 500 rps, `WORKERS=64` | 18.0, 11.0 | 12.4, 8.3 | 2 |
+| B: A + gRPC 200 rps (`ghz`, 50 conns, direct to the grpcbin ClusterIP) | 22.6, 14.3 | 17.3, 12.0 | 2 |
+| C: B + OTLP export to the in-cluster collector | 20.4, 14.9 | 13.6, 12.3 | 2 |
+| D: C + `WORKERS=32` (the August setting) | 14.1 | 11.0 | 1 |
+
+- **Measured range: agent 11-23% of one core; in-kernel BPF time a further 8-17%; together about 19-40%.** The BPF time is the `bpf_stats` run time summed over every BPF program on the node, so it can include programs other than the agent's. It is charged to the applications' syscall CPUs, not to the agent process.
+- **No single added condition moves the number far**: gRPC adds about 3-4 points, OTLP and `WORKERS=32` add nothing measurable at this noise level. The highest single run (rep 1 of B, 22.6% agent + 17.3% kernel) is still under half of 87%.
+- **The two reps differ by up to 7 points** (A: 18.0 vs 11.0). In the first rep, A (`drops=3266`) and C (`drops=241`, sticky sampling at `sample_n=8`) had ring-buffer drops; B did not; every second-rep run had `drops=0`. I did not isolate why the first rep was higher. Treat these as a range, not a mean. Config D has one run; a third rep of each config was killed by the host's low-memory guard and was not rerun.
+- **Not tested**: 60 s runs, 3 replicas of `api` behind the ClusterIP with load spread across them as in August, and the August binary. If the 87% was real it came from something not in this ladder (an older build, a different node state, or the August measurement window including start-up); I cannot say which.
+- **Run lengths and tools**: `perf stat -p <agent>` `task-clock` over the 30 s load window; achieved rates were HTTP 100% success and gRPC 199.9-200 rps in every run.
+
+The README no longer states 87% as a result.
