@@ -614,7 +614,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     let stale = lock_mut(&llm_rb).evict_stale(now);
                     for c in &stale {
-                        log_llm_call(c);
+                        report_llm_call(c, &export_rb, &id_rb, now);
                         clear_inflight(&inflight_rb, c.tgid, c.fd);
                     }
                 }
@@ -659,6 +659,12 @@ async fn main() -> anyhow::Result<()> {
 
     drop(ebpf);
     Ok(())
+}
+
+fn report_llm_call(c: &llm::LlmCall, export: &ExportHub, identity: &Mutex<IdentityResolver>, now: Instant) {
+    log_llm_call(c);
+    let src = lock_mut(identity).resolve(c.tgid, now).label;
+    export.record_llm(c, &src);
 }
 
 fn log_llm_call(c: &llm::LlmCall) {
@@ -1319,7 +1325,7 @@ fn ingest_http_io(
         clear_inflight(inflight, tgid, fd);
     }
     for call in &ing.llm {
-        log_llm_call(call);
+        report_llm_call(call, export, identity, now);
     }
     for x in ing.h2 {
         handle_h2_exchange(

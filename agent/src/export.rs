@@ -300,6 +300,21 @@ impl ExportHub {
         }
     }
 
+    /// Queue a gen_ai span for a finished LLM call. No-op when OTLP export is off.
+    pub fn record_llm(&self, c: &crate::llm::LlmCall, src: &str) {
+        if !self.enabled {
+            return;
+        }
+        let queued = self
+            .spans
+            .lock()
+            .map(|mut q| q.push(crate::trace_export::build_llm_span(c, src)))
+            .unwrap_or(false);
+        if !queued {
+            self.traces_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Join profile samples for a completed span (independent of OTLP export and trace sampling).
     fn try_profile_join(
         &self,

@@ -14,11 +14,12 @@ jobs:
       # agent/build.rs compiles the eBPF crate with nightly -Z build-std.
       - run: rustup toolchain install nightly --profile minimal --component rust-src
       - run: sudo apt-get update && sudo apt-get install -y clang llvm pkg-config
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/bpf-linker
-          key: bpf-linker-${{ runner.os }}
-      - run: command -v bpf-linker || cargo install bpf-linker --locked
+      # Prebuilt musl binary: `cargo install bpf-linker` fails here (cannot find libLLVM).
+      - run: |
+          d=$(mktemp -d)
+          curl -fsSL https://github.com/aya-rs/bpf-linker/releases/download/v0.13.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar --zstd -x -C "$d"
+          install -m755 "$(find "$d" -type f -name bpf-linker | head -1)" "$HOME/.cargo/bin/bpf-linker"
+          bpf-linker --version
       - uses: Swatinem/rust-cache@v2
       # .cargo/config.toml sets runner="sudo -E" for BPF loads; unit tests must not use it.
       - run: cargo test -p obsagent-common --features user --config 'target."cfg(all())".runner="env"'

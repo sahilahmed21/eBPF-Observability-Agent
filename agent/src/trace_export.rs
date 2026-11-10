@@ -44,6 +44,55 @@ pub struct SpanRec {
     pub wire_ns: Option<u64>,
     pub handshake_ns: Option<u64>,
     pub profile_frames: Option<[String; 5]>,
+    pub llm: Option<LlmAttrs>,
+}
+
+/// GenAI semantic-convention inputs for an LLM call span. `None` tokens are omitted, never 0.
+#[derive(Clone, Debug)]
+pub struct LlmAttrs {
+    pub provider: &'static str,
+    pub ttfb_ns: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub complete: bool,
+}
+
+/// One client span per LLM call. Not sampled: LLM calls are rare and each one matters.
+pub fn build_llm_span(c: &crate::llm::LlmCall, src: &str) -> SpanRec {
+    let (start_unix_ns, end_unix_ns) = unix_range_from_duration(c.total_ns);
+    let meta = TraceMeta {
+        tgid: c.tgid,
+        fd: c.fd,
+        stream_id: 0,
+        t_start_ns: end_unix_ns as u64,
+        is_client: true,
+    };
+    let (trace_id, span_id) = span_ids(meta);
+    SpanRec {
+        trace_id,
+        span_id,
+        name: "chat".to_string(),
+        start_unix_ns,
+        end_unix_ns,
+        status_code: c.status,
+        kind_client: true,
+        src: src.to_string(),
+        dst: c.host.clone(),
+        method: "POST".to_string(),
+        route: strip_query(&c.path).to_string(),
+        protocol: "http/1.1".to_string(),
+        wire_ns: None,
+        handshake_ns: None,
+        profile_frames: None,
+        llm: Some(LlmAttrs {
+            // shortcut: provider guessed from the path, upgrade when the Host/model is parsed.
+            provider: if c.path.starts_with("/v1/messages") { "anthropic" } else { "openai" },
+            ttfb_ns: c.ttfb_ns,
+            input_tokens: c.input_tokens,
+            output_tokens: c.output_tokens,
+            complete: c.complete,
+        }),
+    }
 }
 
 pub fn sample_n_from_env() -> u64 {
@@ -132,6 +181,7 @@ pub fn build_span(
         wire_ns,
         handshake_ns,
         profile_frames,
+        llm: None,
     }
 }
 
@@ -184,6 +234,19 @@ fn span_json(s: &SpanRec) -> String {
     }
     if let Some(h) = s.handshake_ns {
         attrs.push(kv_int("obsagent.tls.handshake_ns", h as i64));
+    }
+    if let Some(l) = &s.llm {
+        attrs.push(kv_str("gen_ai.operation.name", "chat"));
+        attrs.push(kv_str("gen_ai.provider.name", l.provider));
+        attrs.push(kv_str("server.address", &s.dst));
+        if let Some(n) = l.input_tokens {
+            attrs.push(kv_int("gen_ai.usage.input_tokens", n as i64));
+        }
+        if let Some(n) = l.output_tokens {
+            attrs.push(kv_int("gen_ai.usage.output_tokens", n as i64));
+        }
+        attrs.push(kv_int("obsagent.llm.ttfb_ns", l.ttfb_ns as i64));
+        attrs.push(kv_str("obsagent.llm.complete", if l.complete { "true" } else { "false" }));
     }
     let events = profile_events_json(s);
     format!(
@@ -420,6 +483,42 @@ mod tests {
             None,
             None,
         )
+    }
+
+    fn llm_call(input: Option<u64>, output: Option<u64>) -> crate::llm::LlmCall {
+        crate::llm::LlmCall {
+            tgid: 7,
+            fd: 3,
+            host: "api.example.com".into(),
+            path: "/v1/messages".into(),
+            status: 200,
+            ttfb_ns: 400_000_000,
+            total_ns: 2_000_000_000,
+            input_tokens: input,
+            output_tokens: output,
+            complete: true,
+        }
+    }
+
+    #[test]
+    fn llm_span_carries_gen_ai_attributes() {
+        let s = build_llm_span(&llm_call(Some(12), Some(34)), "svc");
+        assert_eq!(s.end_unix_ns - s.start_unix_ns, 2_000_000_000);
+        let v: serde_json::Value = serde_json::from_str(&to_otlp_traces_json(&[s])).unwrap();
+        let span = &v["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+        assert_eq!(span["name"], "chat");
+        let a = span["attributes"].as_array().unwrap();
+        let get = |k: &str| a.iter().find(|x| x["key"] == k).map(|x| x["value"].clone());
+        assert_eq!(get("gen_ai.usage.input_tokens").unwrap()["intValue"], "12");
+        assert_eq!(get("gen_ai.usage.output_tokens").unwrap()["intValue"], "34");
+        assert_eq!(get("gen_ai.provider.name").unwrap()["stringValue"], "anthropic");
+        assert_eq!(get("obsagent.llm.ttfb_ns").unwrap()["intValue"], "400000000");
+    }
+
+    #[test]
+    fn llm_span_omits_unknown_tokens() {
+        let body = to_otlp_traces_json(&[build_llm_span(&llm_call(None, None), "svc")]);
+        assert!(!body.contains("gen_ai.usage"));
     }
 
     #[test]
