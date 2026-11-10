@@ -38,6 +38,7 @@ impl EndpointKey {
             | EventKind::SockIoTimes
             | EventKind::TlsHandshake => "sockio",
             EventKind::StackSample => "profile",
+            EventKind::FileOp => "fileop",
         };
         format!("{ip}:{port} {dir}")
     }

@@ -105,6 +105,8 @@ pub enum EventKind {
     TlsHandshake = 6,
     /// perf_event user stack sample (Phase 12; `STACKS` RingBuf).
     StackSample = 7,
+    /// `openat` / `execve` filename (Phase E; opt-in `OBSAGENT_FILEOPS=1`).
+    FileOp = 8,
 }
 
 impl EventKind {
@@ -117,6 +119,7 @@ impl EventKind {
             5 => Some(Self::SockIoTimes),
             6 => Some(Self::TlsHandshake),
             7 => Some(Self::StackSample),
+            8 => Some(Self::FileOp),
             _ => None,
         }
     }
@@ -245,6 +248,28 @@ pub struct StackSampleEvent {
 }
 
 pub const STACK_SAMPLE_EVENT_SIZE: usize = core::mem::size_of::<StackSampleEvent>();
+
+pub const FILE_OP_PATH_LEN: usize = 128;
+pub const FILE_OP_OPEN: u8 = 1;
+pub const FILE_OP_EXEC: u8 = 2;
+
+/// `openat` (op 1) / `execve` (op 2) filename as passed by the process, NUL-padded, truncated
+/// to `FILE_OP_PATH_LEN`. Relative paths stay relative (no cwd/dfd resolution).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FileOpEvent {
+    pub kind: u8,
+    pub op: u8,
+    pub _pad: [u8; 2],
+    pub pid: u32,
+    pub tgid: u32,
+    pub _pad2: u32,
+    pub ts_ns: u64,
+    pub cgroup_id: u64,
+    pub path: [u8; FILE_OP_PATH_LEN],
+}
+
+pub const FILE_OP_EVENT_SIZE: usize = core::mem::size_of::<FileOpEvent>();
 
 /// Per-fd peer metadata. BPF map value for `SOCK_META`.
 ///
@@ -457,7 +482,8 @@ mod tests {
         assert_eq!(EventKind::from_u8(6), Some(EventKind::TlsHandshake));
         assert_eq!(EventKind::from_u8(7), Some(EventKind::StackSample));
         assert_eq!(EventKind::from_u8(0), None);
-        assert_eq!(EventKind::from_u8(8), None);
+        assert_eq!(EventKind::from_u8(8), Some(EventKind::FileOp));
+        assert_eq!(EventKind::from_u8(9), None);
         assert_eq!(AF_INET6, 10);
     }
 
@@ -554,6 +580,13 @@ mod tests {
         assert_eq!(EventKind::SockIoTimes as u8, 5);
         assert_eq!(EventKind::TlsHandshake as u8, 6);
         assert_eq!(EventKind::StackSample as u8, 7);
+    }
+
+    #[test]
+    fn file_op_event_layout() {
+        assert_eq!(FILE_OP_EVENT_SIZE, 160);
+        assert_eq!(EventKind::from_u8(8), Some(EventKind::FileOp));
+        assert_eq!(core::mem::offset_of!(FileOpEvent, path), 32);
     }
 
     #[test]

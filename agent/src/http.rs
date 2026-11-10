@@ -54,25 +54,27 @@ pub struct ParsedExchange {
 
 /// Strip sensitive headers in-place (Q14). Prefix bytes are not span
 /// attributes; call this if a future sink exports raw prefixes.
-#[allow(dead_code)]
 pub fn redact_headers(buf: &mut [u8]) {
-    for header in [b"authorization:" as &[u8], b"cookie:", b"set-cookie:"] {
+    for header in [b"authorization:" as &[u8], b"cookie:", b"set-cookie:", b"api-key:"] {
         redact_header_line(buf, header);
     }
 }
 
+/// Redacts every occurrence of `name_lc` (matched case-insensitively, so `x-api-key:` and
+/// `proxy-authorization:` are covered by `api-key:` / `authorization:`).
 fn redact_header_line(buf: &mut [u8], name_lc: &[u8]) {
     let lower: Vec<u8> = buf.iter().map(u8::to_ascii_lowercase).collect();
-    let Some(mut i) = find_subslice(&lower, name_lc) else {
-        return;
-    };
-    i += name_lc.len();
-    while i < buf.len() && (buf[i] == b' ' || buf[i] == b'\t') {
-        i += 1;
-    }
-    while i < buf.len() && buf[i] != b'\r' && buf[i] != b'\n' {
-        buf[i] = b'*';
-        i += 1;
+    let mut from = 0;
+    while let Some(p) = find_subslice(&lower[from..], name_lc) {
+        let mut i = from + p + name_lc.len();
+        while i < buf.len() && (buf[i] == b' ' || buf[i] == b'\t') {
+            i += 1;
+        }
+        while i < buf.len() && buf[i] != b'\r' && buf[i] != b'\n' {
+            buf[i] = b'*';
+            i += 1;
+        }
+        from = i;
     }
 }
 

@@ -3,17 +3,22 @@ mod cgroup_index;
 mod correlate;
 mod decode;
 mod dual_plane;
+mod evlog;
 mod export;
 mod filter;
 mod h2;
 mod http;
 mod http_agg;
 mod identity;
+mod ingest;
 mod k8s_index;
+mod llm;
 mod metrics_registry;
 mod peer_cache;
+mod policy;
 mod profile;
 mod reassemble;
+mod replay;
 mod sample;
 mod service_map;
 mod stack_decode;
@@ -46,11 +51,12 @@ use filter::{
     allowed_tgids_from_proc, classify_ingest, collect_self_ids, denied_tgids_from_proc,
     is_otlp_export_route, tgid_map_delta, CommFilter, IngestSkip,
 };
-use h2::{looks_like_h2, looks_like_http11, H2Exchange, H2Registry};
+use h2::{H2Exchange, H2Registry};
 use http::{normalize_path, parse_exchange, HttpEndpoint, ParsedExchange};
 use http_agg::HttpAggregator;
 use identity::IdentityResolver;
 use k8s_index::{spawn_pod_index_if_configured, PodIndex};
+use llm::LlmTracker;
 use obsagent_common::{IoDir, SockIoEvent, SockMeta};
 use peer_cache::PeerCache;
 use profile::{ProfileConfig, ProfileStore};
@@ -81,6 +87,14 @@ enum View {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("replay") {
+        let path = args.get(2).context("usage: obsagent replay <events.evlog>")?;
+        return run_replay(path);
+    }
+    let mut recorder = open_recorder()?;
+    let policy = load_policy()?;
 
     let rlim = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
@@ -127,6 +141,11 @@ async fn main() -> anyhow::Result<()> {
     attach_tp(&mut ebpf, "enter_accept4", "syscalls", "sys_enter_accept4")?;
     attach_tp(&mut ebpf, "exit_accept4", "syscalls", "sys_exit_accept4")?;
     attach_tp(&mut ebpf, "enter_close", "syscalls", "sys_enter_close")?;
+    if std::env::var_os("OBSAGENT_FILEOPS").is_some() {
+        attach_tp(&mut ebpf, "enter_openat", "syscalls", "sys_enter_openat")?;
+        attach_tp(&mut ebpf, "enter_execve", "syscalls", "sys_enter_execve")?;
+        warn!("OBSAGENT_FILEOPS: openat/execve probes attached (high event rate; scope with OBSAGENT_COMM_ALLOW)");
+    }
     attach_tp(&mut ebpf, "enter_read", "syscalls", "sys_enter_read")?;
     attach_tp(&mut ebpf, "exit_read", "syscalls", "sys_exit_read")?;
     attach_tp(&mut ebpf, "enter_write", "syscalls", "sys_enter_write")?;
@@ -248,6 +267,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let calib_dport = Arc::new(AtomicU16::new(0));
     let reassembler = Arc::new(Mutex::new(Reassembler::default()));
+    let llm = Arc::new(Mutex::new(LlmTracker::default()));
     let h2 = Arc::new(Mutex::new(H2Registry::default()));
     let dual = Arc::new(Mutex::new(DualPlane::from_env()));
     let tls_client_only = std::env::var_os("OBSAGENT_TLS_SERVER").is_none();
@@ -272,6 +292,7 @@ async fn main() -> anyhow::Result<()> {
     let filter_rb = comm_filter.clone();
     let reassemble_rb = Arc::clone(&reassembler);
     let h2_rb = Arc::clone(&h2);
+    let llm_rb = Arc::clone(&llm);
     let dual_rb = Arc::clone(&dual);
     let bpf_ids_rb = Arc::clone(&bpf_self_ids);
     let self_ids_rb = Arc::clone(&self_ids);
@@ -416,6 +437,13 @@ async fn main() -> anyhow::Result<()> {
                                 continue;
                             }
                         }
+                        if let Some(w) = recorder.as_mut() {
+                            // shortcut: synchronous write in the drain loop; opt-in debug tool.
+                            if let Err(e) = w.write(item.as_ref()) {
+                                warn!("event log write failed, recording stopped: {e}");
+                                recorder = None;
+                            }
+                        }
                         match decoded {
                             DecodedEvent::Latency(ev) => {
                                 lock_mut(&tcp_rb).record(&ev, now);
@@ -431,6 +459,7 @@ async fn main() -> anyhow::Result<()> {
                                     &id_rb,
                                     &reassemble_rb,
                                     &h2_rb,
+                                    &llm_rb,
                                     &dual_rb,
                                     &inflight_rb,
                                     &denied_rb,
@@ -456,6 +485,7 @@ async fn main() -> anyhow::Result<()> {
                                     &id_rb,
                                     &reassemble_rb,
                                     &h2_rb,
+                                    &llm_rb,
                                     &dual_rb,
                                     &inflight_rb,
                                     &denied_rb,
@@ -476,6 +506,17 @@ async fn main() -> anyhow::Result<()> {
                                     lock_mut(&dual_rb).note(ev.tgid, ev.fd, dir, ev.ts_ns, now);
                                 }
                             }
+                            DecodedEvent::FileOp(ev) => {
+                                let end = ev.path.iter().position(|b| *b == 0).unwrap_or(ev.path.len());
+                                let path = String::from_utf8_lossy(&ev.path[..end]);
+                                let op = if ev.op == obsagent_common::FILE_OP_EXEC { policy::Op::Exec } else { policy::Op::Open };
+                                if let Some(v) = policy.as_ref().and_then(|p| p.check(op, &path)) {
+                                    warn!(
+                                        "policy_violation op={:?} tgid={} pid={} path={} rule={:?}",
+                                        v.op, ev.tgid, ev.pid, v.path, v.rule
+                                    );
+                                }
+                            }
                             DecodedEvent::TlsHandshake(ev) => {
                                 lock_mut(&dual_rb).record_handshake(ev.latency_ns, now);
                                 export_rb.note_handshake(
@@ -492,6 +533,12 @@ async fn main() -> anyhow::Result<()> {
                     guard.clear_ready();
                 }
                 _ = tick.tick() => {
+                    if let Some(w) = recorder.as_mut() {
+                        if let Err(e) = w.flush() {
+                            warn!("event log flush failed, recording stopped: {e}");
+                            recorder = None;
+                        }
+                    }
                     {
                         let mut r = lock_mut(&rates_rb);
                         r.push(events_in_tick);
@@ -565,6 +612,11 @@ async fn main() -> anyhow::Result<()> {
                     for (tgid, fd) in unmarks {
                         clear_inflight(&inflight_rb, tgid, fd);
                     }
+                    let stale = lock_mut(&llm_rb).evict_stale(now);
+                    for c in &stale {
+                        log_llm_call(c);
+                        clear_inflight(&inflight_rb, c.tgid, c.fd);
+                    }
                 }
             }
         }
@@ -606,6 +658,74 @@ async fn main() -> anyhow::Result<()> {
     }
 
     drop(ebpf);
+    Ok(())
+}
+
+fn log_llm_call(c: &llm::LlmCall) {
+    info!(
+        "llm_call tgid={} fd={} host={} path={} status={} ttfb_ms={:.1} total_ms={:.1} in_tokens={:?} out_tokens={:?} complete={}",
+        c.tgid,
+        c.fd,
+        c.host,
+        c.path,
+        c.status,
+        c.ttfb_ns as f64 / 1e6,
+        c.total_ns as f64 / 1e6,
+        c.input_tokens,
+        c.output_tokens,
+        c.complete
+    );
+}
+
+type Recorder = evlog::Writer<std::io::BufWriter<std::fs::File>>;
+
+/// `OBSAGENT_RECORD=<path>` records post-filter RingBuf records (mode 0600, secrets redacted
+/// in HTTP/1 headers; HTTP/2 header blocks are not). Fails startup if the file cannot be opened.
+fn open_recorder() -> anyhow::Result<Option<Recorder>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(path) = std::env::var_os("OBSAGENT_RECORD") else {
+        return Ok(None);
+    };
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("OBSAGENT_RECORD: cannot create {path:?}"))?;
+    warn!("recording events to {path:?}: plaintext prefixes, treat as sensitive");
+    Ok(Some(evlog::Writer::new(std::io::BufWriter::new(f))?))
+}
+
+/// `OBSAGENT_POLICY=<rules file>`; a bad rule fails startup rather than being ignored.
+fn load_policy() -> anyhow::Result<Option<policy::Policy>> {
+    let Some(path) = std::env::var_os("OBSAGENT_POLICY") else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(&path).with_context(|| format!("OBSAGENT_POLICY: read {path:?}"))?;
+    Ok(Some(policy::Policy::parse(&text).map_err(anyhow::Error::msg)?))
+}
+
+fn run_replay(path: &str) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let records = evlog::read_all(std::io::BufReader::new(
+        std::fs::File::open(path).with_context(|| format!("open {path}"))?,
+    ))?;
+    let (rows, calls) = replay::replay_full(&records);
+    let mut by: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for r in rows {
+        by.entry(format!("{} {}", r.endpoint.label(), r.status)).or_default().push(r.latency_ns);
+    }
+    println!("records={}", records.len());
+    for (k, mut v) in by {
+        v.sort_unstable();
+        println!("{k} count={} p50_ns={}", v.len(), v[v.len() / 2]);
+    }
+    for c in &calls {
+        println!(
+            "llm host={} path={} status={} ttfb_ns={} total_ns={} in={:?} out={:?} complete={}",
+            c.host, c.path, c.status, c.ttfb_ns, c.total_ns, c.input_tokens, c.output_tokens, c.complete
+        );
+    }
     Ok(())
 }
 
@@ -1163,6 +1283,7 @@ fn ingest_http_io(
     identity: &Mutex<IdentityResolver>,
     reassembler: &Mutex<Reassembler>,
     h2: &Mutex<H2Registry>,
+    llm: &Mutex<LlmTracker>,
     dual: &Mutex<DualPlane>,
     inflight: &Mutex<AyaHashMap<MapData, u64, u8>>,
     denied: &Mutex<u64>,
@@ -1186,66 +1307,38 @@ fn ingest_http_io(
         }
     }
 
-    let plen = (ev.prefix_len as usize).min(ev.prefix.len());
-    let chunk = if plen == 0 {
-        &[][..]
-    } else {
-        &ev.prefix[..plen]
-    };
-
-    if lock_mut(h2).is_marked(ev.tgid, ev.fd) && looks_like_http11(chunk) {
-        lock_mut(h2).drop_conn(ev.tgid, ev.fd);
-        for (tgid, fd) in lock_mut(h2).take_unmark() {
-            clear_inflight(inflight, tgid, fd);
-        }
-    }
-
-    let use_h2 = lock_mut(h2).is_marked(ev.tgid, ev.fd) || looks_like_h2(chunk);
-    if use_h2 {
-        let (exchanges, unmarks) = {
-            let mut h = lock_mut(h2);
-            let xs = h.feed(&ev, now, client_only);
-            (xs, h.take_unmark())
-        };
-        for (tgid, fd) in unmarks {
-            clear_inflight(inflight, tgid, fd);
-        }
-        for x in exchanges {
-            handle_h2_exchange(
-                x,
-                now,
-                sock_meta,
-                peer_cache,
-                identity,
-                pods,
-                cgroups,
-                service_map,
-                http_agg,
-                export,
-            );
-        }
-        return;
-    }
-
-    let (flushed, unmarks) = {
+    // Lock order reassembler → h2 → correlator → llm; nothing else nests these.
+    let ing = {
         let mut r = lock_mut(reassembler);
-        let flushed = r.push(&ev, now);
-        (flushed, r.take_unmark())
+        let mut h = lock_mut(h2);
+        let mut c = lock_mut(correlator);
+        let mut l = lock_mut(llm);
+        ingest::ingest_pure(ev, now, client_only, &mut r, &mut h, &mut c, &mut l)
     };
-    for (tgid, fd) in unmarks {
+    for (tgid, fd) in ing.clear_inflight {
         clear_inflight(inflight, tgid, fd);
     }
-    let Some(ev) = flushed else {
-        return;
-    };
-    *lock_mut(reasm_count) += 1;
-    clear_inflight(inflight, ev.tgid, ev.fd);
-    let ex = if client_only {
-        lock_mut(correlator).observe_client(&ev, now)
-    } else {
-        lock_mut(correlator).observe(&ev, now)
-    };
-    if let Some(ex) = ex {
+    for call in &ing.llm {
+        log_llm_call(call);
+    }
+    for x in ing.h2 {
+        handle_h2_exchange(
+            x,
+            now,
+            sock_meta,
+            peer_cache,
+            identity,
+            pods,
+            cgroups,
+            service_map,
+            http_agg,
+            export,
+        );
+    }
+    if ing.reassembled {
+        *lock_mut(reasm_count) += 1;
+    }
+    if let Some(ex) = ing.exchange {
         handle_exchange(
             ex,
             now,

@@ -5,7 +5,7 @@ use aya_ebpf::{
     EbpfContext,
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_prandom_u32, bpf_ktime_get_ns,
-        bpf_probe_read_user, bpf_probe_read_user_buf,
+        bpf_probe_read_user, bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes,
     },
     macros::{kprobe, map, perf_event, tracepoint, uprobe, uretprobe},
     maps::{Array, HashMap, PerCpuArray, RingBuf},
@@ -15,7 +15,8 @@ use aya_ebpf::bindings::BPF_F_USER_STACK;
 use aya_ebpf::helpers::bpf_get_stack;
 use aya_log_ebpf::info;
 use obsagent_common::{
-    AF_INET, AF_INET6, EVENTS_RINGBUF_BYTES, EventKind, IO_BUF_LEN_UNBOUNDED, IoDir,
+    AF_INET, AF_INET6, EVENTS_RINGBUF_BYTES, EventKind, FILE_OP_EXEC, FILE_OP_OPEN, FileOpEvent,
+    IO_BUF_LEN_UNBOUNDED, IoDir,
     PENDING_MAP_ENTRIES, PendingEnter, PendingIo, PendingTls, SOCK_IO_PREFIX_LEN, SockIoEvent,
     SockIoTimesEvent, SockLatencyEvent, SockMeta, SockMetaKeep, StackSampleEvent,
     STACKS_RINGBUF_BYTES, STACK_SAMPLE_MAX_FRAMES, TlsHandshakeEvent,
@@ -570,6 +571,63 @@ pub fn smoke_probe(ctx: ProbeContext) -> u32 {
 fn try_smoke_probe(ctx: ProbeContext) -> Result<u32, u32> {
     info!(&ctx, "kprobe called");
     Ok(0)
+}
+
+// --- openat / execve filenames (Phase E, attached only when OBSAGENT_FILEOPS=1) ---
+
+/// Scratch for FileOpEvent (160 B) — keeps it off the BPF stack.
+#[map]
+static FILE_SCRATCH: PerCpuArray<FileOpEvent> = PerCpuArray::with_max_entries(1, 0);
+
+// Field offsets from /sys/kernel/tracing/events/syscalls/sys_enter_{openat,execve}/format (6.6).
+const OPENAT_FILENAME_OFF: usize = 24;
+const EXECVE_FILENAME_OFF: usize = 16;
+
+fn emit_file_op(ctx: &TracePointContext, op: u8, filename_off: usize) -> Result<(), i64> {
+    let (tgid, pid) = pid_tgid();
+    if !tgid_captured(tgid) {
+        return Ok(());
+    }
+    let fname: u64 = unsafe { ctx.read_at(filename_off)? };
+    let Some(scratch) = FILE_SCRATCH.get_ptr_mut(0) else {
+        return Ok(());
+    };
+    let ev = unsafe { &mut *scratch };
+    ev.kind = EventKind::FileOp as u8;
+    ev.op = op;
+    ev._pad = [0; 2];
+    ev.pid = pid;
+    ev.tgid = tgid;
+    ev._pad2 = 0;
+    ev.ts_ns = unsafe { bpf_ktime_get_ns() };
+    ev.cgroup_id = unsafe { bpf_get_current_cgroup_id() };
+    ev.path = [0; 128];
+    if unsafe { bpf_probe_read_user_str_bytes(fname as *const u8, &mut ev.path) }.is_err() {
+        return Ok(());
+    }
+    let Some(mut slot) = EVENTS.reserve::<FileOpEvent>(0) else {
+        bump_drop();
+        return Ok(());
+    };
+    slot.write(*ev);
+    slot.submit(0);
+    Ok(())
+}
+
+#[tracepoint]
+pub fn enter_openat(ctx: TracePointContext) -> u32 {
+    match emit_file_op(&ctx, FILE_OP_OPEN, OPENAT_FILENAME_OFF) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[tracepoint]
+pub fn enter_execve(ctx: TracePointContext) -> u32 {
+    match emit_file_op(&ctx, FILE_OP_EXEC, EXECVE_FILENAME_OFF) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
 }
 
 // --- connect ---

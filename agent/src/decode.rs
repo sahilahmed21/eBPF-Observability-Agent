@@ -1,7 +1,7 @@
 //! RingBuf demux (Phase 2 Q5 / Phase 3 Q3): kind byte selects payload layout.
 
 use obsagent_common::{
-    EventKind, SOCK_IO_EVENT_SIZE, SOCK_IO_PREFIX_LEN, SOCK_IO_TIMES_EVENT_SIZE,
+    EventKind, FileOpEvent, FILE_OP_EVENT_SIZE, SOCK_IO_EVENT_SIZE, SOCK_IO_PREFIX_LEN, SOCK_IO_TIMES_EVENT_SIZE,
     SOCK_LATENCY_EVENT_SIZE, SockIoEvent, SockIoTimesEvent, SockLatencyEvent,
     TLS_HANDSHAKE_EVENT_SIZE, TLS_IO_EVENT_SIZE, TlsHandshakeEvent,
 };
@@ -14,11 +14,13 @@ pub enum DecodedEvent {
     TlsIo(SockIoEvent),
     SockIoTimes(SockIoTimesEvent),
     TlsHandshake(TlsHandshakeEvent),
+    FileOp(FileOpEvent),
 }
 
 impl DecodedEvent {
     pub fn tgid(&self) -> u32 {
         match self {
+            Self::FileOp(ev) => ev.tgid,
             Self::Latency(ev) => ev.tgid,
             Self::Io(ev) | Self::TlsIo(ev) => ev.tgid,
             Self::SockIoTimes(ev) => ev.tgid,
@@ -28,6 +30,7 @@ impl DecodedEvent {
 
     pub fn pid(&self) -> u32 {
         match self {
+            Self::FileOp(ev) => ev.pid,
             Self::Latency(ev) => ev.pid,
             Self::Io(ev) | Self::TlsIo(ev) => ev.pid,
             Self::SockIoTimes(ev) => ev.pid,
@@ -78,6 +81,13 @@ pub fn decode_event(bytes: &[u8]) -> Option<DecodedEvent> {
                 return None;
             }
             Some(DecodedEvent::TlsHandshake(ev))
+        }
+        EventKind::FileOp => {
+            if bytes.len() < FILE_OP_EVENT_SIZE {
+                return None;
+            }
+            let ev = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<FileOpEvent>()) };
+            Some(DecodedEvent::FileOp(ev))
         }
         EventKind::StackSample => None,
     }

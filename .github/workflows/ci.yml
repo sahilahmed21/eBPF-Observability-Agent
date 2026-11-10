@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # agent/build.rs compiles the eBPF crate with nightly -Z build-std.
+      - run: rustup toolchain install nightly --profile minimal --component rust-src
+      - run: sudo apt-get update && sudo apt-get install -y clang llvm pkg-config
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/bpf-linker
+          key: bpf-linker-${{ runner.os }}
+      - run: command -v bpf-linker || cargo install bpf-linker --locked
+      - uses: Swatinem/rust-cache@v2
+      # .cargo/config.toml sets runner="sudo -E" for BPF loads; unit tests must not use it.
+      - run: cargo test -p obsagent-common --features user --config 'target."cfg(all())".runner="env"'
+      - run: cargo test -p obsagent --config 'target."cfg(all())".runner="env"'
