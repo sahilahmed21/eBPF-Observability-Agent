@@ -17,7 +17,7 @@ Validated on **WSL2 + k3s** (claim lock **10/10**, 2026-08-25):
 | Dual-plane TLS | Content latency + wire timing join; handshake via `SSL_do_handshake` |
 | Service map | Named edge **`demo/frontend` → `demo/api`** on a real node |
 | OTLP + Grafana | Metrics + sampled traces scraped end-to-end |
-| Overhead (pin load) | HTTP **500/s** + gRPC **~200/s** on WSL2 + k3s → agent **~11–23%** of one core plus **~8–17%** in-kernel BPF time (2026-11 re-measurement; the August ~87% was **retracted**, see `docs/overhead.md`) |
+| Overhead (pin load) | HTTP **500/s** + gRPC **~200/s** on WSL2 + k3s → agent **~11–23%** of one core plus **~8–17%** in-kernel BPF time (2026-11 re-measurement; August's own protocol, 60 s × 3, gave a mean 17.6%; the August ~87% was **retracted**, see `docs/overhead.md`) |
 | Overload | RingBuf drops visible; sticky sampling engages (`sample_n=2`); RSS stable |
 | CPU profiles | Optional join of stacks onto slow spans (`OBSAGENT_PROFILE=1`) |
 

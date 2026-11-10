@@ -53,19 +53,20 @@ The probes make this loop about 44% slower than the agent without them (1.63 s v
 
 ## Retraction of the August ~87% (2026-11-10)
 
-The August figure (~87% of one core) is **retracted as a headline**. It could not be reproduced, and no named cause was found. What was measured instead, on the same WSL2 k3s node, agent on the node with `OBSAGENT_K8S=1`, vegeta 500 rps HTTP/1.1 to the `api` ClusterIP, 30 s windows, one or two runs per config:
+The August figure (~87% of one core) is **retracted as a headline**. It could not be reproduced, and no named cause was found. What was measured instead, on the same WSL2 k3s node, agent on the node with `OBSAGENT_K8S=1`, vegeta 500 rps HTTP/1.1 to the `api` ClusterIP, 30 s windows (except the last row), two or three runs per config:
 
-| Config (conditions added one at a time) | Agent CPU, % of one core | In-kernel BPF time, % of one core | Runs |
+| Config (conditions added one at a time) | Agent CPU, % of one core (per run) | In-kernel BPF time, % of one core (per run) | Runs |
 |---|---|---|---|
-| A: HTTP 500 rps, `WORKERS=64` | 18.0, 11.0 | 12.4, 8.3 | 2 |
-| B: A + gRPC 200 rps (`ghz`, 50 conns, direct to the grpcbin ClusterIP) | 22.6, 14.3 | 17.3, 12.0 | 2 |
-| C: B + OTLP export to the in-cluster collector | 20.4, 14.9 | 13.6, 12.3 | 2 |
-| D: C + `WORKERS=32` (the August setting) | 14.1 | 11.0 | 1 |
+| A: HTTP 500 rps, `WORKERS=64` | 18.0, 11.0, 13.1 | 12.4, 8.3, 9.4 | 3 |
+| B: A + gRPC 200 rps (`ghz`, 50 conns, direct to the grpcbin ClusterIP) | 22.6, 14.3, 15.4 | 17.3, 12.0, 12.2 | 3 |
+| C: B + OTLP export to the in-cluster collector | 20.4, 14.9, 14.9 | 13.6, 12.3, 11.3 | 3 |
+| D: C + `WORKERS=32` (the August setting) | 14.1, 15.5 | 11.0, 12.1 | 2 |
+| D at the August protocol: 60 s windows, 3 runs | 16.5, 18.2, 18.0 (mean 17.6) | 10.3, 12.0, 12.0 | 3 |
 
-- **Measured range: agent 11-23% of one core; in-kernel BPF time a further 8-17%; together about 19-40%.** The BPF time is the `bpf_stats` run time summed over every BPF program on the node, so it can include programs other than the agent's. It is charged to the applications' syscall CPUs, not to the agent process.
-- **No single added condition moves the number far**: gRPC adds about 3-4 points, OTLP and `WORKERS=32` add nothing measurable at this noise level. The highest single run (rep 1 of B, 22.6% agent + 17.3% kernel) is still under half of 87%.
-- **The two reps differ by up to 7 points** (A: 18.0 vs 11.0). In the first rep, A (`drops=3266`) and C (`drops=241`, sticky sampling at `sample_n=8`) had ring-buffer drops; B did not; every second-rep run had `drops=0`. I did not isolate why the first rep was higher. Treat these as a range, not a mean. Config D has one run; a third rep of each config was killed by the host's low-memory guard and was not rerun.
-- **Not tested**: 60 s runs, 3 replicas of `api` behind the ClusterIP with load spread across them as in August, and the August binary. If the 87% was real it came from something not in this ladder (an older build, a different node state, or the August measurement window including start-up); I cannot say which.
+- **Measured range: agent 11-23% of one core; in-kernel BPF time a further 8-17%; together about 19-40%; the later, drop-free runs sit at agent 11-18% plus kernel 8-12%.** The BPF time is the `bpf_stats` run time summed over every BPF program on the node, so it can include programs other than the agent's. It is charged to the applications' syscall CPUs, not to the agent process.
+- **No single added condition moves the number far**: gRPC adds about 2-4 points, OTLP and `WORKERS=32` add nothing measurable at this noise level. The highest single run (rep 1 of B, 22.6% agent + 17.3% kernel) is still under half of 87%.
+- **Run-to-run spread is up to 7 points** (A: 18.0 vs 11.0). In the first rep, A (`drops=3266`) and C (`drops=241`, sticky sampling at `sample_n=8`) had ring-buffer drops and B did not; every run in reps 2 and 3 had `drops=0`, and the reps 2-3 agent numbers are tighter (11.0-15.5%). I did not isolate why the first rep was higher. Config D has two runs (no rep 1). Each run is one 30 s window; rep 3 was run after a fresh WSL boot with the k3s pods just started.
+- **The August protocol itself (config D, 60 s x 3) gave a mean agent CPU of 17.6%, not 87%.** (The first of the three had `drops=3401`.) `api` has three replicas behind the ClusterIP, so the load was spread across them as in August. Not tested: the August binary and the August node state. If the 87% was real it came from one of those or from the August measurement window; I cannot say which.
 - **Run lengths and tools**: `perf stat -p <agent>` `task-clock` over the 30 s load window; achieved rates were HTTP 100% success and gRPC 199.9-200 rps in every run.
 
 The README no longer states 87% as a result.

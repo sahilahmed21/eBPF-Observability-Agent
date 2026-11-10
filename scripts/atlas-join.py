@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join obsagent gen_ai spans to Atlas gateway step rows and report the error distribution.
 
-usage: atlas-join.py <atlas.sqlite> <otlp-sink.log> [--window-s 1.0] [--server-contains :18450]
+usage: atlas-join.py <atlas.sqlite> <otlp-sink.log> [--window-s 0.4] [--server-contains :18450]
 
 Atlas side: steps(ts, completion_ms, ttft_ms, prompt_tokens, completion_tokens, run_id, step), ts = commit time.
 Agent side: OTLP JSON lines "<path> <body>", spans named "chat" with gen_ai.usage.* attributes.
@@ -67,7 +67,7 @@ def dist(name: str, errs: list[float], unit: str) -> None:
 
 def main() -> None:
     db, sink = sys.argv[1], sys.argv[2]
-    win = float(sys.argv[sys.argv.index("--window-s") + 1]) if "--window-s" in sys.argv else 1.0
+    win = float(sys.argv[sys.argv.index("--window-s") + 1]) if "--window-s" in sys.argv else 0.4
     rows, spans = atlas_rows(db), agent_spans(sink)
     if "--server-contains" in sys.argv:
         # The gateway re-streams SSE to its own client, so the agent sees two LLM calls per step:
