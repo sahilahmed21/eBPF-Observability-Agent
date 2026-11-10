@@ -141,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
     attach_tp(&mut ebpf, "enter_accept4", "syscalls", "sys_enter_accept4")?;
     attach_tp(&mut ebpf, "exit_accept4", "syscalls", "sys_exit_accept4")?;
     attach_tp(&mut ebpf, "enter_close", "syscalls", "sys_enter_close")?;
-    if std::env::var_os("OBSAGENT_FILEOPS").is_some() {
+    if std::env::var("OBSAGENT_FILEOPS").is_ok_and(|v| !v.is_empty() && v != "0") {
         attach_tp(&mut ebpf, "enter_openat", "syscalls", "sys_enter_openat")?;
         attach_tp(&mut ebpf, "enter_execve", "syscalls", "sys_enter_execve")?;
         warn!("OBSAGENT_FILEOPS: openat/execve probes attached (high event rate; scope with OBSAGENT_COMM_ALLOW)");

@@ -34,3 +34,17 @@ Executed with `perf stat -p <agent>` (15 s window), `perf record -F 999`, and `k
 - **The August ~87% is not reproduced here** (≈14–21% for a similar load). Differences not isolated: k3s node (many other processes in the 1 Hz `/proc` sweep and more captured traffic), `OBSAGENT_K8S=1`, OTLP/trace export on, 3 `api` replicas via ClusterIP. Next experiment: rerun this script on the k3s node and compare `events` per second by `comm`.
 
 **Footnote:** eBPF programs run on the **syscall’s CPU** (apps, kubelet). That cost is **not** in the agent `perf -p` number. Do not treat cgroup `cpu.stat` as a second official headline.
+
+## k3s re-measurement and probe costs (2026-11-10)
+
+**k3s node, HTTP only.** Agent on the k3s node (WSL2) with `OBSAGENT_K8S=1`, OTLP off, vegeta 500 rps / 30 s to the `api` ClusterIP, `perf stat -p`: idle ~0.7% of one core, under load ~10.6%. This matches the plain-WSL2 HTTP number (~9.8%), so the k3s node and the K8S default deny-list do not explain the August ~87%. What this run did not include, and August did: 200 rps gRPC (`frontend-grpc` is in CrashLoopBackOff on this cluster), OTLP export to the collector, `WORKERS=32`. The gap remains unexplained; the remaining suspects are gRPC/HTTP/2 decode cost and OTLP export under load.
+
+**`OBSAGENT_FILEOPS` (openat/execve probes) is expensive on open-heavy workloads.** Worst-case load: 4 processes x 300 000 `open()`+`close()` each (about 1.2 M opens in ~1 s), plain WSL2, agent with `OBSAGENT_K8S=0`, single run each:
+
+| Configuration | Slowest process wall time | Agent CPU over a 20 s window |
+|---|---|---|
+| no agent | 0.94 s | n/a |
+| agent, probes off | 1.09 s | ~0.13 s (~0.7%) |
+| agent, `OBSAGENT_FILEOPS=1` | 1.65 s | ~1.13 s (~5.7%) |
+
+`bpf_stats` for `enter_openat`: 2.15 s over 1.22 M calls, about 1.76 us per `open`; `enter_execve` is negligible at these counts. Every open emits one RingBuf record, so the agent also pays to drain and policy-check each one. This is a deliberately open-heavy loop, not a typical service, but it shows the probes should be scoped (`OBSAGENT_COMM_ALLOW`) rather than run node-wide. `OBSAGENT_FILEOPS=0` now means off (before, any set value attached the probes).

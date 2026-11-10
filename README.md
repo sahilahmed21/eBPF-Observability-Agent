@@ -51,6 +51,8 @@ APM SDKs require changing every service. This agent attaches to the **kernel** a
 
 ## Agent observability additions (2026-11)
 
+Write-up with the numbers and the failures: [`docs/blog-observing-agents-with-ebpf.md`](docs/blog-observing-agents-with-ebpf.md).
+
 Measured on WSL2 (kernel 6.6), loopback, no k3s. Reproduce with the scripts named below.
 
 | Capability | How it is verified | Result |
@@ -62,7 +64,7 @@ Measured on WSL2 (kernel 6.6), loopback, no k3s. Reproduce with the scripts name
 | Policy audit (detection only) | `scripts/correctness-policy.sh`, `OBSAGENT_FILEOPS=1 OBSAGENT_POLICY=<rules>` | 5/5 canary violations detected, 0 unexpected, 5 benign scenarios |
 | Unit tests | `./scripts/wsl-run.sh test-common` and `test-agent` | 22 + 188 pass |
 
-Scope notes: LLM capture needs the TLS plaintext path (OpenSSL), HTTP/1.1 chunked SSE, and sees only the first 256 B of each read, so a cut-off usage object gives `None`, never `0`. The policy audit has 5 labeled scenarios, deny-prefix/deny-basename rules only, and no process-tree scoping; the `openat`/`execve` probes fire for every captured process, so their overhead was not measured.
+Scope notes: LLM capture needs the TLS plaintext path (OpenSSL), HTTP/1.1 chunked SSE, and sees only the first 256 B of each read, so a cut-off usage object gives `None`, never `0`. The policy audit has 5 labeled scenarios, deny-prefix/deny-basename rules only, and no process-tree scoping; the `openat`/`execve` probes fire for every captured process and cost about 1.8 µs per `open` plus agent CPU (a 1.2 M-open loop ran 51% longer than with the agent alone), so scope them with `OBSAGENT_COMM_ALLOW`; details in `docs/overhead.md`.
 
 ---
 
