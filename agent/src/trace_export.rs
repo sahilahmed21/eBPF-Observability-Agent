@@ -59,7 +59,31 @@ pub struct LlmAttrs {
 
 /// One client span per LLM call. Not sampled: LLM calls are rare and each one matters.
 pub fn build_llm_span(c: &crate::llm::LlmCall, src: &str) -> SpanRec {
-    let (start_unix_ns, end_unix_ns) = unix_range_from_duration(c.total_ns);
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid out-pointer; CLOCK_MONOTONIC is the clock the BPF `ts_ns` fields use.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    let now_mono = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
+    build_llm_span_at(c, src, now_unix, now_mono)
+}
+
+/// Place the span by the call's own event timestamps: a call is often reported late (a lost
+/// stop marker is only noticed at the client's next request), so `now` is not its end time.
+pub fn build_llm_span_at(
+    c: &crate::llm::LlmCall,
+    src: &str,
+    now_unix_ns: u128,
+    now_mono_ns: u64,
+) -> SpanRec {
+    let end_mono = c.start_ts_ns.saturating_add(c.total_ns);
+    let end_unix_ns = now_unix_ns.saturating_sub(u128::from(now_mono_ns.saturating_sub(end_mono)));
+    let start_unix_ns = end_unix_ns.saturating_sub(u128::from(c.total_ns));
     let meta = TraceMeta {
         tgid: c.tgid,
         fd: c.fd,
@@ -492,6 +516,7 @@ mod tests {
             host: "api.example.com".into(),
             path: "/v1/messages".into(),
             status: 200,
+            start_ts_ns: 0,
             ttfb_ns: 400_000_000,
             total_ns: 2_000_000_000,
             input_tokens: input,
@@ -513,6 +538,16 @@ mod tests {
         assert_eq!(get("gen_ai.usage.output_tokens").unwrap()["intValue"], "34");
         assert_eq!(get("gen_ai.provider.name").unwrap()["stringValue"], "anthropic");
         assert_eq!(get("obsagent.llm.ttfb_ns").unwrap()["intValue"], "400000000");
+    }
+
+    #[test]
+    fn llm_span_is_placed_by_event_time_not_report_time() {
+        // The call's last event was 3 s (monotonic) before it was reported.
+        let mut c = llm_call(Some(1), Some(2));
+        c.start_ts_ns = 7_000_000_000 - 2_000_000_000; // ends at 7 s monotonic: start 5 s + total 2 s
+        let s = build_llm_span_at(&c, "svc", 1_000_000_000_000, 10_000_000_000);
+        assert_eq!(s.end_unix_ns, 1_000_000_000_000 - 3_000_000_000);
+        assert_eq!(s.end_unix_ns - s.start_unix_ns, 2_000_000_000);
     }
 
     #[test]

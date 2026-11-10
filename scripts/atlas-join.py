@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join obsagent gen_ai spans to Atlas gateway step rows and report the error distribution.
 
-usage: atlas-join.py <atlas.sqlite> <otlp-sink.log> [--window-s 1.0]
+usage: atlas-join.py <atlas.sqlite> <otlp-sink.log> [--window-s 1.0] [--server-contains :18450]
 
 Atlas side: steps(ts, completion_ms, ttft_ms, prompt_tokens, completion_tokens, run_id, step), ts = commit time.
 Agent side: OTLP JSON lines "<path> <body>", spans named "chat" with gen_ai.usage.* attributes.
@@ -37,6 +37,7 @@ def agent_spans(path: str) -> list[dict]:
                             "in": int(a["gen_ai.usage.input_tokens"]) if "gen_ai.usage.input_tokens" in a else None,
                             "out": int(a["gen_ai.usage.output_tokens"]) if "gen_ai.usage.output_tokens" in a else None,
                             "complete": a.get("obsagent.llm.complete"),
+                            "server": a.get("server.address", ""),
                         }
                     )
     return sorted(out, key=lambda x: x["end"])
@@ -68,6 +69,12 @@ def main() -> None:
     db, sink = sys.argv[1], sys.argv[2]
     win = float(sys.argv[sys.argv.index("--window-s") + 1]) if "--window-s" in sys.argv else 1.0
     rows, spans = atlas_rows(db), agent_spans(sink)
+    if "--server-contains" in sys.argv:
+        # The gateway re-streams SSE to its own client, so the agent sees two LLM calls per step:
+        # keep only the gateway -> upstream hop.
+        want = sys.argv[sys.argv.index("--server-contains") + 1]
+        print(f"agent chat spans total={len(spans)}, other hops dropped: {sum(1 for s in spans if want not in s['server'])}")
+        spans = [s for s in spans if want in s["server"]]
     llm_rows = [r for r in rows if r["is_stream"] and r["fault"] is None and r["outcome"] == "ok"]
     other = [r for r in rows if r not in llm_rows]
     print(f"atlas steps={len(rows)} (streaming ok={len(llm_rows)}, other={len(other)}) agent chat spans={len(spans)}")
@@ -75,19 +82,21 @@ def main() -> None:
     used: set[int] = set()
     pairs, missed_rows = [], []
     for r in llm_rows:
-        best = min(
-            (i for i in range(len(spans)) if i not in used),
-            key=lambda i: abs(spans[i]["end"] - r["ts"]),
-            default=None,
-        )
-        if best is not None and abs(spans[best]["end"] - r["ts"]) <= win:
+        # On one host the upstream server's own view of the same call is also a span (it ends early:
+        # its next write ends the stream). Within the window prefer the longest span, then the nearest.
+        near = [i for i in range(len(spans)) if i not in used and abs(spans[i]["end"] - r["ts"]) <= win]
+        best = max(near, key=lambda i: (spans[i]["total_ms"], -abs(spans[i]["end"] - r["ts"])), default=None)
+        if best is not None:
             used.add(best)
             pairs.append((r, spans[best]))
         else:
             missed_rows.append(r)
     extra = [s for i, s in enumerate(spans) if i not in used]
 
-    print(f"joined={len(pairs)} atlas_rows_without_span={len(missed_rows)} spans_without_row={len(extra)}")
+    print(f"joined={len(pairs)} atlas_rows_without_span={len(missed_rows)} spans_without_row={len(extra)} "
+          f"(of which complete={sum(1 for s in extra if s['complete'] == 'true')})")
+    inc = [(r, s) for r, s in pairs if s["complete"] != "true"]
+    print(f"joined spans without a stop marker (complete=false): {len(inc)}")
     dist("total_ms  (agent total - atlas completion_ms)", [s["total_ms"] - r["completion_ms"] for r, s in pairs if r["completion_ms"] is not None], "ms")
     dist("ttfb vs ttft (agent headers - atlas first content)", [s["ttfb_ms"] - r["ttft_ms"] for r, s in pairs if r["ttft_ms"] is not None], "ms")
     dist("end-time skew (agent end - atlas ts)", [(s["end"] - r["ts"]) * 1000 for r, s in pairs], "ms")

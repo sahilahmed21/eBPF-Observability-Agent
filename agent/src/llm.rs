@@ -25,6 +25,9 @@ pub struct LlmCall {
     pub host: String,
     pub path: String,
     pub status: u16,
+    /// Monotonic (`CLOCK_MONOTONIC`) timestamp of the request write; the call ends at
+    /// `start_ts_ns + total_ns`, which places it in wall-clock time whenever it is reported.
+    pub start_ts_ns: u64,
     /// Request write → response headers.
     pub ttfb_ns: u64,
     /// Request write → last observed stream event.
@@ -67,6 +70,7 @@ impl LlmTracker {
             host: header(&ex.req_prefix, "host").unwrap_or_default(),
             path,
             status: status_code(&ex.resp_prefix),
+            start_ts_ns: ex.t_start_ns,
             ttfb_ns,
             total_ns: ttfb_ns,
             input_tokens: None,

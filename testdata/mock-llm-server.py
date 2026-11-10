@@ -100,10 +100,13 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     port = int(os.environ.get("PORT", "18450"))
     httpd = HTTPServer(("127.0.0.1", port), Handler)
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(certfile=os.environ["TLS_CERT"], keyfile=os.environ["TLS_KEY"])
-    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
-    print(f"mock-llm-server listening on https://127.0.0.1:{port}", flush=True)
+    scheme = "http"
+    if os.environ.get("TLS", "1") != "0":  # TLS=0: cleartext, like Atlas's default local workers
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile=os.environ["TLS_CERT"], keyfile=os.environ["TLS_KEY"])
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        scheme = "https"
+    print(f"mock-llm-server listening on {scheme}://127.0.0.1:{port}", flush=True)
     httpd.serve_forever()
 
 
