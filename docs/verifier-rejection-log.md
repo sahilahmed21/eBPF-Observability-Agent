@@ -1,7 +1,6 @@
 # Verifier rejection log
 
-Append-only log of **real** BPF verifier / bpf-linker stack rejections hit while building this agent.
-Hypothetical entries do not belong here — interview prep needs scar tissue.
+Append-only log of BPF stack-limit build failures. **Both current entries were induced on purpose** (a 600 B stack buffer was added to see the failure) and come from the bpf-linker/LLVM stack check at build time, **not** from the kernel verifier at load time. No natural kernel-verifier rejection is recorded here yet.
 
 | Date | Program / function | Symptom (verifier message summary) | Root cause | Fix / restructure |
 |------|--------------------|--------------------------------------|------------|-------------------|

@@ -49,6 +49,32 @@ APM SDKs require changing every service. This agent attaches to the **kernel** a
 
 **Scope (honest):** OpenSSL 1.1/3.x plaintext path; not rustls/Go `crypto/tls`. Single-node DaemonSet model; not multi-cluster APM. Privileged host agent — treat as a trust boundary.
 
+## Agent observability additions (2026-11)
+
+Measured on WSL2 (kernel 6.6), loopback, no k3s. Reproduce with the scripts named below.
+
+| Capability | How it is verified | Result |
+|---|---|---|
+| Replayable pipeline | `obsagent replay <file>` over a real capture, `tests/fixtures/slow-50ms.evlog` (no root) | 15 exchanges, p50 50.5 ms; live agent on the same run: 15, 50.5 ms; 20 replays identical |
+| Record with redaction | `OBSAGENT_RECORD=<path>` (mode 0600) | `authorization`, `cookie`, `x-api-key` header values overwritten before write; HTTP/2 header blocks are **not** redacted |
+| Loss behaviour | unit test over replay: drop 0/10/50% of records | exchanges recovered = exchanges whose request and response records both survive |
+| Streamed LLM calls (SSE, HTTP/1.1) | `scripts/correctness-llm.sh`, 30 calls vs client-side timing | worst error: TTFB 0.14%, total 0.05%; token counts exact |
+| Policy audit (detection only) | `scripts/correctness-policy.sh`, `OBSAGENT_FILEOPS=1 OBSAGENT_POLICY=<rules>` | 5/5 canary violations detected, 0 unexpected, 5 benign scenarios |
+| Unit tests | `./scripts/wsl-run.sh test-common` and `test-agent` | 22 + 188 pass |
+
+Scope notes: LLM capture needs the TLS plaintext path (OpenSSL), HTTP/1.1 chunked SSE, and sees only the first 256 B of each read, so a cut-off usage object gives `None`, never `0`. The policy audit has 5 labeled scenarios, deny-prefix/deny-basename rules only, and no process-tree scoping; the `openat`/`execve` probes fire for every captured process, so their overhead was not measured.
+
+---
+
+## Limitations
+
+- **Overhead is high and environment-dependent.** ~87% of one core (agent process only, `perf stat -p`) at 500 HTTP + ~200 gRPC rps on WSL2 + k3s; a 2026-11 re-measurement on plain WSL2 loopback gave ~14–21% for the same load, and in-kernel BPF time (~16 µs per `write`) is additional and not in either number. The k3s gap is not yet explained. Details: [`docs/overhead.md`](docs/overhead.md).
+- **Latency ends at response headers**, so a streamed response is measured to its headers, not its last byte.
+- **Capture is a 256 B prefix** of the first iovec per syscall; no `io_uring` or `sendfile` probes.
+- **OpenSSL only.** No Go `crypto/tls` or rustls. OpenTelemetry's eBPF Instrumentation (OBI) covers more TLS stacks and protocols; this project is a learning-grade agent, not a replacement for it.
+- **No trace propagation.** Each exchange is a root span; the service map shows edges but spans are not parent/child linked.
+- **Tested on one kernel** (WSL2 6.6). Unit tests run in CI; the correctness gates need root and a BPF-capable host.
+
 ---
 
 ## Quick demo (Kubernetes)

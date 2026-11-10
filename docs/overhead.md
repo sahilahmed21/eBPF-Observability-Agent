@@ -16,4 +16,21 @@ Record the **same** load script every milestone (`benches/` once it exists).
 
 **Method (Phase 11):** `perf stat -p <agent_pid>` `task-clock`; % of one core = `CPUs utilized × 100`. Mean of 3 runs.
 
+## Phase C re-measurement (2026-11-09, WSL2, loopback, no k3s)
+
+Executed with `perf stat -p <agent>` (15 s window), `perf record -F 999`, and `kernel.bpf_stats_enabled=1` + `bpftool prog show`. Agent started with `OBSAGENT_K8S=0`, OTLP off. Load: vegeta 500 rps HTTP/1.1 `/fast` and/or ghz 200 rps gRPC (50 conns) against `testdata` servers. `perf stat` and `bpf_stats` are single windows; run-to-run spread was ~14–21% of one core for the combined load.
+
+| Load | Agent userspace CPU (one core = 100%) | Per request |
+|---|---|---|
+| idle (agent only) | ~1.3% (kernel `/proc` reads: `proc_pid_status`, `kernfs_*`, from the 1 Hz sweep) | — |
+| HTTP/1.1 500 rps | ~9.8% (1.46 s / 15 s), 916 M instructions | ~122 k instructions |
+| gRPC 200 rps | ~7.8% (1.17 s / 15 s) | — |
+| HTTP 500 + gRPC 200 | ~14–21% (2.06–3.09 s / 15 s) | ~150–230 k instructions |
+
+- **Pure pipeline is cheap.** `obsagent replay` of 250 000 recorded records (30 000 exchanges) = ~650 M instructions, ~2 600 per record, ~21 600 per exchange (HTTP/1.1 only, decode + reassemble + correlate + parse; no aggregation, export, identity, or locks). That is ~15% of the ~150 k instructions per request measured live.
+- **Live profile is flat.** No function above ~4%; top entries are `malloc`, tokio scheduling, and kernel `bpf()` map syscalls (`htab_map_delete_elem`, from `clear_inflight`).
+- **In-kernel BPF time is as large as the agent.** Combined load, whole run (~28 s): `exit_write` 15.9 µs/call (58.9 k calls), `exit_writev` 33 µs/call, `exit_recvfrom` 8.3 µs/call, `exit_read` 2 µs/call; all probes together ≈ 2.8 s. This is charged to the application's syscall CPU, not to the agent's `perf -p`.
+- **Rejected hypothesis.** Reading only `prefix_len` bytes and dropping the 256-iteration zero loop in `emit_io_kind` did not change per-call cost (`exit_write` 17.0 µs, `exit_writev` 34.7 µs vs 15.9 / 33.0); reverted. Untested: RingBuf wakeup per event (`submit(0)` wakes the consumer when it has caught up).
+- **The August ~87% is not reproduced here** (≈14–21% for a similar load). Differences not isolated: k3s node (many other processes in the 1 Hz `/proc` sweep and more captured traffic), `OBSAGENT_K8S=1`, OTLP/trace export on, 3 `api` replicas via ClusterIP. Next experiment: rerun this script on the k3s node and compare `events` per second by `comm`.
+
 **Footnote:** eBPF programs run on the **syscall’s CPU** (apps, kubelet). That cost is **not** in the agent `perf -p` number. Do not treat cgroup `cpu.stat` as a second official headline.
